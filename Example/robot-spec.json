@@ -1,0 +1,77 @@
+{
+  "version": "robot-v1",
+  "envelope": {
+    "widthMM": 160.0,
+    "heightMM": 140.0
+  },
+  "origin": {
+    "xMM": -10.0,
+    "yMM": 0.0
+  },
+  "wheels": [
+    {
+      "id": "left",
+      "xMM": -10.0,
+      "yMM": 35.0,
+      "widthMM": 22.0,
+      "heightMM": 15.0
+    },
+    {
+      "id": "right",
+      "xMM": -10.0,
+      "yMM": -35.0,
+      "widthMM": 22.0,
+      "heightMM": 15.0
+    }
+  ],
+  "sensors": [
+    {
+      "id": "S1",
+      "xMM": 60.0,
+      "yMM": -5.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S2",
+      "xMM": 60.0,
+      "yMM": 5.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S3",
+      "xMM": 60.0,
+      "yMM": 15.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S4",
+      "xMM": 60.0,
+      "yMM": 25.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S5",
+      "xMM": 60.0,
+      "yMM": 35.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S6",
+      "xMM": 60.0,
+      "yMM": -35.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S7",
+      "xMM": 60.0,
+      "yMM": -25.0,
+      "sizeMM": 5.0
+    },
+    {
+      "id": "S8",
+      "xMM": 60.0,
+      "yMM": -15.0,
+      "sizeMM": 5.0
+    }
+  ]
+}

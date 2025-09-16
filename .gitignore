@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- JSON rules (projeto) ---
+# Manter os .json dentro de log/ (inclusive subpastas)
+!log/
+!log/**/*.json
+
+# Ignorar apenas .json na pasta raiz do repositório
+/*.json
+# --- fim ---

@@ -1,0 +1,87 @@
+{
+  "area": {
+    "widthMM": 3000.0,
+    "heightMM": 2000.0
+  },
+  "origin": {
+    "p": {
+      "x": 500.0,
+      "y": 500.0
+    },
+    "headingDeg": 0.0
+  },
+  "tapeWidthMM": 20.0,
+  "segments": [
+    {
+      "kind": "straight",
+      "id": "R1",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "straight",
+      "id": "R2",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "straight",
+      "id": "R3",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "arc",
+      "id": "C1",
+      "radiusMM": 300.0,
+      "sweepDeg": 90.0
+    },
+    {
+      "kind": "straight",
+      "id": "R4",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "arc",
+      "id": "C2",
+      "radiusMM": 300.0,
+      "sweepDeg": 90.0
+    },
+    {
+      "kind": "straight",
+      "id": "R5",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "straight",
+      "id": "R6",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "straight",
+      "id": "R7",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "arc",
+      "id": "C3",
+      "radiusMM": 300.0,
+      "sweepDeg": 90.0
+    },
+    {
+      "kind": "straight",
+      "id": "R8",
+      "lengthMM": 500.0
+    },
+    {
+      "kind": "arc",
+      "id": "C4",
+      "radiusMM": 300.0,
+      "sweepDeg": 90.0
+    }
+  ],
+  "startFinish": {
+    "enabled": true,
+    "onSegmentId": "R1",
+    "sParamMM": 0.0,
+    "invert": false,
+    "startIsForward": true
+  }
+}
