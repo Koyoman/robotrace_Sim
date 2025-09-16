@@ -41,13 +41,24 @@ def advance_straight(pose: Pose, d: float) -> Pose:
 
 def advance_arc(pose: Pose, R: float, sweepDeg: float) -> Pose:
     a0 = rad(pose.headingDeg)
-    # centro do giro (esquerda)
-    cx = pose.p.x - R*math.sin(a0)
-    cy = pose.p.y + R*math.cos(a0)
-    a1 = a0 + rad(sweepDeg)
-    x = cx + R*math.sin(a1)
-    y = cy - R*math.cos(a1)
+    # lado do centro: +1 para curva à ESQUERDA (sweep>0), -1 para DIREITA (sweep<0)
+    s = 1.0 if sweepDeg >= 0.0 else -1.0
+    # vetor "esquerda" do heading
+    Lx, Ly = -math.sin(a0), math.cos(a0)
+    # centro correto (esquerda ou direita conforme o sinal)
+    cx = pose.p.x + s * R * Lx
+    cy = pose.p.y + s * R * Ly
+
+    # ângulo polar do ponto inicial em torno do centro
+    phi0 = math.atan2(pose.p.y - cy, pose.p.x - cx)
+    # avança pelo sweep (com sinal)
+    phi1 = phi0 + rad(sweepDeg)
+
+    # novo ponto sobre o círculo e heading final
+    x = cx + R * math.cos(phi1)
+    y = cy + R * math.sin(phi1)
     return Pose(Pt(x, y), pose.headingDeg + sweepDeg)
+
 
 # ======================
 # Modelos simples
@@ -278,7 +289,7 @@ def point_to_polyline_distance_mm(px: float, py: float, poly: List[Pt]) -> float
 # envelope toca a fita?
 def envelope_contacts_tape(robot: Robot, x: float, y: float, heading_deg: float,
                            tape_poly: List[Pt], tape_w: float,
-                           grid_n: int = 9, margin_mm: float = 0.5) -> bool:
+                           grid_n: int = 9, margin_mm: float = 1.5) -> bool:
     """
     Retorna True se QUALQUER parte do envelope está sobre a fita.
     Amostra uma malha grid_n x grid_n no retângulo do robô (rotacionado)
@@ -292,7 +303,6 @@ def envelope_contacts_tape(robot: Robot, x: float, y: float, heading_deg: float,
     if grid_n < 3:
         grid_n = 3
 
-    # gera coordenadas locais uniformes em [-hw, +hw] x [-hh, +hh]
     for iy in range(grid_n):
         ly = -hh + (2.0 * hh) * (iy / (grid_n - 1))
         for ix in range(grid_n):
@@ -300,9 +310,9 @@ def envelope_contacts_tape(robot: Robot, x: float, y: float, heading_deg: float,
             rx, ry = rot(lx, ly, ang)
             px, py = x + rx, y + ry
             if point_to_polyline_distance_mm(px, py, tape_poly) <= half:
-                return True  # early-exit no primeiro contato
-
+                return True
     return False
+
 
 def estimate_sensor_coverage(px: float, py: float, tape_poly: List[Pt], tape_w: float, sensor_size: float) -> float:
     n = 5
@@ -341,6 +351,42 @@ def import_controller(path: str):
     if ext == ".py": return load_python_controller(path)
     raise ValueError("Somente .py aqui para simplificar; adicione .so/.dll se precisar.")
 
+# --- coloque este helper acima da classe SimWorker ---
+def _orient(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> float:
+    # área orientada do triângulo (a,b,c): >0 anti-horário, <0 horário, =0 colinear
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+
+def _on_segment(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> bool:
+    # c está no retângulo fechado [a,b] assumindo colinearidade
+    return min(ax, bx) - 1e-9 <= cx <= max(ax, bx) + 1e-9 and \
+           min(ay, by) - 1e-9 <= cy <= max(ay, by) + 1e-9
+
+def segments_intersect(p1, p2, p3, p4) -> bool:
+    """
+    Retorna True se o segmento p1->p2 intersecta o segmento p3->p4.
+    p* são objetos com atributos .x e .y (ex.: Pt).
+    """
+    ax, ay = p1.x, p1.y
+    bx, by = p2.x, p2.y
+    cx, cy = p3.x, p3.y
+    dx, dy = p4.x, p4.y
+
+    o1 = _orient(ax, ay, bx, by, cx, cy)
+    o2 = _orient(ax, ay, bx, by, dx, dy)
+    o3 = _orient(cx, cy, dx, dy, ax, ay)
+    o4 = _orient(cx, cy, dx, dy, bx, by)
+
+    # caso geral
+    if (o1 * o2) < 0.0 and (o3 * o4) < 0.0:
+        return True
+    # casos colineares (com tolerância)
+    eps = 1e-9
+    if abs(o1) <= eps and _on_segment(ax, ay, bx, by, cx, cy): return True
+    if abs(o2) <= eps and _on_segment(ax, ay, bx, by, dx, dy): return True
+    if abs(o3) <= eps and _on_segment(cx, cy, dx, dy, ax, ay): return True
+    if abs(o4) <= eps and _on_segment(cx, cy, dx, dy, bx, by): return True
+    return False
+
 # ======================
 # Worker de simulação
 # ======================
@@ -364,7 +410,8 @@ class SimWorker(QThread):
     def run(self):
         try:
             segs, origin, tapeW = segments_from_json(self.track)
-            tape_poly = segments_polyline(segs, step=8.0)
+            tape_poly = segments_polyline(segs, step=4.0)  # polilinha mais densa reduz erros de distância
+
             # partida/chegada
             gates = start_finish_lines(self.track, segs, tapeW)
             start_gate, finish_gate = (None, None) if (gates is None) else gates
@@ -385,38 +432,102 @@ class SimWorker(QThread):
             w = 0.0
             x, y, h = x0, y0, h0
 
-            # mapeamento PWM->velocidade de roda (simples)
+            # PWM -> velocidade de roda
             def pwm_to_wheel_v(pwm: int) -> float:
                 pwm = max(0, min(4095, int(pwm)))
                 return (pwm/4095.0) * self.v_final  # mm/s
 
-            # distância entre rodas (track width) a partir do modelo
-            wl = next((w for w in self.robot.wheels if w.id.lower() == "left"), None)
-            wr = next((w for w in self.robot.wheels if w.id.lower() == "right"), None)
+            # distância entre rodas
+            wl = next((ww for ww in self.robot.wheels if ww.id.lower() == "left"), None)
+            wr = next((ww for ww in self.robot.wheels if ww.id.lower() == "right"), None)
             trackW = abs((wr.yMM if wr else 35.0) - (wl.yMM if wl else -35.0))
 
-            # loop
-            steps_out = []
-            max_ms = 300000  # 5min máx
-            finished = False
-            crossed_finish = False
-            last_side = None
+            # --- utilitários geométricos locais ---
+            def gate_side(px: float, py: float, gate) -> int:
+                (ga, gb, _) = gate
+                vx, vy = (gb.x - ga.x), (gb.y - ga.y)
+                wx, wy = (px - ga.x), (py - ga.y)
+                s = vx*wy - vy*wx
+                return 1 if s >= 0.0 else -1  # sinal da meia-plana
 
-            # >>>> NOVO: enviar chunks menores para atualizar a UI <<<<
-            CHUNK_STEPS = 100  # antes: 1000
+            def rect_corners_world(cx: float, cy: float, heading_deg: float):
+                hw = self.robot.envelope.widthMM/2.0
+                hh = self.robot.envelope.heightMM/2.0
+                ang = rad(heading_deg)
+                corners = [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]
+                out = []
+                for lx,ly in corners:
+                    rx, ry = rot(lx, ly, ang)
+                    out.append((cx+rx, cy+ry))
+                return out
 
-            def side_of_gate(px: float, py: float, gate) -> float:
-                (a, b, _) = gate
-                vx, vy = (b.x - a.x), (b.y - a.y)
-                wx, wy = (px - a.x), (py - a.y)
-                return math.copysign(1.0, vx*wy - vy*wx)
+            # distância do ponto à RETA infinita AB
+            def point_line_dist(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+                vx, vy = bx-ax, by-ay
+                den = math.hypot(vx, vy)
+                if den < 1e-12:
+                    return float("inf")
+                return abs(vx*(py-ay) - vy*(px-ax)) / den
 
+            # parâmetro da projeção do ponto na RETA AB (u=0 no A, u=1 no B)
+            def proj_u(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+                vx, vy = bx-ax, by-ay
+                L2 = vx*vx + vy*vy
+                if L2 < 1e-12:
+                    return 0.0
+                return ((px-ax)*vx + (py-ay)*vy) / L2
+
+            # --- CHEGADA (pára ao encostar o PINO amarelo da chegada) -------------------
+            # prepara o pino da CHEGADA uma única vez (geometria idêntica à usada no draw)
+            finish_pin = None  # (S, E, thickness_half)
             if finish_gate is not None:
-                last_side = side_of_gate(x, y, finish_gate)
+                ga, gb, hdg = finish_gate
+                a_rad = rad(hdg)
+                nx, ny = -math.sin(a_rad), math.cos(a_rad)  # lado ESQUERDO
+                base = (tapeW * 0.5) + MARKER_OFFSET_MM
+                # centro do gate
+                cx_gate = (ga.x + gb.x) * 0.5
+                cy_gate = (ga.y + gb.y) * 0.5
+                # ponto inicial e final do pino (segmento central do traço)
+                sx, sy = cx_gate + nx * base, cy_gate + ny * base
+                ex, ey = sx + nx * MARKER_LENGTH_MM, sy + ny * MARKER_LENGTH_MM
+                finish_pin = (Pt(sx, sy), Pt(ex, ey), MARKER_THICKNESS_MM * 0.5)
+
+            # helpers geométricos locais
+            def dist_point_to_seg(px, py, ax, ay, bx, by) -> float:
+                vx, vy = bx - ax, by - ay
+                L2 = vx * vx + vy * vy
+                if L2 < 1e-12:
+                    return math.hypot(px - ax, py - ay)
+                t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / L2))
+                cx, cy = ax + t * vx, ay + t * vy
+                return math.hypot(px - cx, py - cy)
+
+            def envelope_corners(cx, cy, heading_deg):
+                hw = self.robot.envelope.widthMM * 0.5
+                hh = self.robot.envelope.heightMM * 0.5
+                ang = rad(heading_deg)
+                cs = [(-hw,-hh), (hw,-hh), (hw,hh), (-hw,hh)]
+                out = []
+                for lx, ly in cs:
+                    rx, ry = rot(lx, ly, ang)
+                    out.append(Pt(cx + rx, cy + ry))
+                return out  # [p0,p1,p2,p3], arestas: p0-p1, p1-p2, p2-p3, p3-p0
+
+
+
+            # loop principal
+            steps_out = []
+            max_ms = 300000  # 5 min
+            finished = False
+            reason = "timeout"
+            CHUNK_STEPS = 100
 
             for t_ms in range(max_ms):
-                if self.cancelled: return
-                # sensores
+                if self.cancelled:
+                    return
+
+                # --- sensores ---
                 a = rad(h)
                 sn_vals = []
                 for s in self.robot.sensors:
@@ -425,7 +536,7 @@ class SimWorker(QThread):
                     cov = estimate_sensor_coverage(px, py, tape_poly, tapeW, s.sizeMM)
                     sn_vals.append(sensor_value_from_coverage(cov))
 
-                # controlador
+                # --- controlador ---
                 state = {
                     "t_ms": t_ms,
                     "pose": {"x_mm": x, "y_mm": y, "heading_deg": h},
@@ -436,7 +547,7 @@ class SimWorker(QThread):
                 pwmL = int(ctrl.get("pwm_left", 0))
                 pwmR = int(ctrl.get("pwm_right", 0))
 
-                # dinâmica 1ª ordem
+                # --- dinâmica 1ª ordem ---
                 vL_cmd = pwm_to_wheel_v(pwmL)
                 vR_cmd = pwm_to_wheel_v(pwmR)
                 v_cmd = 0.5*(vL_cmd + vR_cmd)
@@ -445,8 +556,9 @@ class SimWorker(QThread):
                 v += (v_cmd - v)*alpha
                 w += (w_cmd - w)*alpha
 
-                # integra
-                h += deg(w*dt)
+                # integra (guarde pose anterior para detecção)
+                prev_x, prev_y, prev_h = x, y, h
+                h += math.degrees(w*dt)
                 a = rad(h)
                 x += v*dt*math.cos(a)
                 y += v*dt*math.sin(a)
@@ -458,23 +570,34 @@ class SimWorker(QThread):
                     "pwmL": pwmL, "pwmR": pwmR
                 })
 
-                # paradas
-                if not envelope_contacts_tape(self.robot, x, y, h, tape_poly, tapeW):
-                    finished = True
-                    reason = "offtrack"
-                    break
+                # --- detectar contato envelope × PINO da CHEGADA
+                if finish_pin is not None:
+                    S, E, half_th = finish_pin
+                    # 1) interseção de arestas do envelope com o segmento central do pino
+                    cs = envelope_corners(x, y, h)
+                    edges = [(cs[i], cs[(i+1) % 4]) for i in range(4)]
+                    touched = any(segments_intersect(a, b, S, E) for (a, b) in edges)
 
-                if finish_gate is not None:
-                    cur_side = side_of_gate(x, y, finish_gate)
-                    if last_side is not None and cur_side != last_side:
-                        crossed_finish = True
-                    last_side = cur_side
-                    if crossed_finish:
+                    # 2) ou proximidade de qualquer canto ao segmento (considera a espessura do traço)
+                    if not touched:
+                        for p in cs:
+                            if dist_point_to_seg(p.x, p.y, S.x, S.y, E.x, E.y) <= (half_th + 0.5):
+                                touched = True
+                                break
+
+                    if touched:
                         finished = True
                         reason = "finished"
                         break
 
-                # >>>> NOVO: emite a cada 100 steps (UI atualiza “Steps executados” sem lag)
+
+                # fora da pista?
+                if not envelope_contacts_tape(self.robot, x, y, h, tape_poly, tapeW, margin_mm=1.5):
+                    finished = True
+                    reason = "offtrack"
+                    break
+
+                # envia para UI em blocos
                 if len(steps_out) >= CHUNK_STEPS:
                     self.sig_chunk.emit(steps_out)
                     steps_out = []
@@ -483,8 +606,10 @@ class SimWorker(QThread):
                 self.sig_chunk.emit(steps_out)
 
             self.sig_done.emit({"ok": True, "reason": reason if finished else "timeout"})
+
         except Exception as e:
             self.sig_fail.emit(str(e))
+
 
 # ======================
 # Cena/View
@@ -557,12 +682,12 @@ class MainWindow(QMainWindow):
         self.combo_speed.addItems(["0.1×", "0.5×", "1×", "2×", "4×"])
         self.combo_speed.setCurrentIndex(2)  # 1×
         form.addRow(QLabel("Velocidade da animação"), self.combo_speed)
-        
+
         self.anim_speed = 1.0
         self.anim_spf = 17  # ~1000/60
         self.combo_speed.currentIndexChanged.connect(self.on_speed_change)
-        
-        
+
+
         form.addRow(self.btn_track)
         form.addRow(self.btn_robot)
         form.addRow(self.btn_ctrl)
@@ -611,35 +736,90 @@ class MainWindow(QMainWindow):
         i = self.anim_idx if self.anim_steps else 0
         self.lbl_time.setText("Tempo sim: {:.2f} s | Vel. anim: {:.1f}×".format(i*0.001, self.anim_speed))
 
+    def _save_last_log(self, info: dict) -> None:
+        """
+        Salva APENAS o último log:
+        - Logs/sim_log.json  (lista de steps)
+        - Logs/sim_log.csv   (um registro por step)
+        Remove quaisquer outros .json/.csv dentro de Logs.
+        """
+        try:
+            os.makedirs("Logs", exist_ok=True)
+            json_path = os.path.join("Logs", "sim_log.json")
+            csv_path  = os.path.join("Logs", "sim_log.csv")
+
+            # 1) JSON (mantém compatível com o que você já usa)
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(self.anim_steps, f, ensure_ascii=False, indent=2)
+
+            # 2) CSV por step (t_ms, pose, velocidades, PWMs)
+            with open(csv_path, "w", newline="", encoding="utf-8") as fcsv:
+                w = csv.writer(fcsv)
+                w.writerow(["t_ms","x_mm","y_mm","heading_deg","v_mm_s","omega_rad_s","pwm_left","pwm_right"])
+                for st in self.anim_steps:
+                    w.writerow([
+                        int(st.get("t_ms", 0)),
+                        float(st.get("x_mm", 0.0)),
+                        float(st.get("y_mm", 0.0)),
+                        float(st.get("heading_deg", 0.0)),
+                        float(st.get("v_mm_s", 0.0)),
+                        float(st.get("omega_rad_s", 0.0)),
+                        int(st.get("pwmL", st.get("pwm_left", 0))),
+                        int(st.get("pwmR", st.get("pwm_right", 0))),
+                    ])
+
+            # 3) Limpeza: mantém só sim_log.json e sim_log.csv
+            for fn in os.listdir("Logs"):
+                if fn.lower().endswith((".json", ".csv")) and fn not in {"sim_log.json", "sim_log.csv"}:
+                    try:
+                        os.remove(os.path.join("Logs", fn))
+                    except Exception:
+                        pass
+        except Exception as e:
+            print("Falha ao salvar log:", e)
+
+
     # ---------- Loaders ----------
     def on_load_track(self):
         path, _ = QFileDialog.getOpenFileName(self, "Pista", "", "JSON (*.json)")
-        if not path: return
+        if not path:
+            return
         with open(path, "r", encoding="utf-8") as f:
             self.track = json.load(f)
+
+        # Desenha a pista
         self.draw_static_track()
+
+        # Se já existe robô carregado, mostra o preview dele na nova pista
+        if self.robot:
+            self.draw_robot_outline_preview()
+
         self.statusBar().showMessage(f"Pista: {os.path.basename(path)}")
 
     def on_load_robot(self):
         path, _ = QFileDialog.getOpenFileName(self, "Carregar robô (JSON)", "", "JSON (*.json)")
-        if not path: return
+        if not path:
+            return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.robot = robot_from_json(json.load(f))
             self.statusBar().showMessage(f"Robô: {os.path.basename(path)}", 5000)
+
+            # Mostra o preview imediatamente se já houver pista carregada
+            if self.track:
+                self.draw_robot_outline_preview()
+
         except Exception as e:
-            # Mostra erro amigável e garante que não há thread pendurada
             self.robot = None
             QMessageBox.critical(self, "Erro ao carregar robô",
                                 f"Falha ao ler '{os.path.basename(path)}':\n{e}")
-            # se por acaso existir worker rodando, peça cancelamento e espere
+            # Se por acaso existir worker rodando, cancela com segurança
             if hasattr(self, "worker") and self.worker and self.worker.isRunning():
                 try:
                     self.worker.cancelled = True
                     self.worker.wait(500)
                 except Exception:
                     pass
-
 
     def on_load_controller(self):
         path, _ = QFileDialog.getOpenFileName(self, "Controlador", "", "Python (*.py);;Shared lib (*.so *.dll *.dylib)")
@@ -664,7 +844,7 @@ class MainWindow(QMainWindow):
                 path.lineTo(p.x, p.y)
             self.scene.addPath(path, QPen(QColor("#f5f5f5"), tapeW, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             self.scene.addPath(path, QPen(QColor("#444444"), 1, Qt.DashLine))
-    
+
         # marcadores de curvatura (brancos) – lado ESQUERDO
         for (pp, hdg) in curvature_change_markers(segs):
             a = rad(hdg)
@@ -673,14 +853,14 @@ class MainWindow(QMainWindow):
             ax, ay = pp.x + nx*base, pp.y + ny*base
             bx, by = ax + nx*MARKER_LENGTH_MM, ay + ny*MARKER_LENGTH_MM
             self.scene.addLine(ax, ay, bx, by, QPen(QColor("#FFFFFF"), MARKER_THICKNESS_MM, Qt.SolidLine, Qt.RoundCap))
-    
+
         # partida/chegada (linhas + pinos, ESQUERDA)
         gates = start_finish_lines(self.track, segs, tapeW)
         if gates:
             for (a, b, hdg) in gates:
                 # linha do gate atravessando a fita
                 self.scene.addLine(a.x, a.y, b.x, b.y, QPen(QColor("#FFD54F"), 4))
-    
+
                 # pino amarelo do lado ESQUERDO
                 a_rad = rad(hdg)
                 nx, ny = -math.sin(a_rad), math.cos(a_rad)
@@ -688,39 +868,70 @@ class MainWindow(QMainWindow):
                 sx, sy = ((a.x + b.x)/2.0) + nx*base, ((a.y + b.y)/2.0) + ny*base
                 ex, ey = sx + nx*MARKER_LENGTH_MM, sy + ny*MARKER_LENGTH_MM
                 self.scene.addLine(sx, sy, ex, ey, QPen(QColor("#FFD54F"), MARKER_THICKNESS_MM, Qt.SolidLine, Qt.RoundCap))
-    
+
         # --- comprimento total da pista (aprox. pela polilinha) ---
         self.track_length_mm = 0.0
         for i in range(len(pts)-1):
             dx = pts[i+1].x - pts[i].x
             dy = pts[i+1].y - pts[i].y
             self.track_length_mm += math.hypot(dx, dy)
-    
+
         # ajusta view
         self.view.fitInView(self.scene.itemsBoundingRect().adjusted(-100, -100, +100, +100), Qt.KeepAspectRatio)
 
     def draw_robot_outline_preview(self):
-        if not (self.track and self.robot): return
-        # apenas redesenha a pista e coloca um retângulo “fantasma” no start
+        # Precisa de pista e robô para posicionar o preview
+        if not (self.track and self.robot):
+            return
+
+        # Mantém a pista na cena (isso limpa a cena e os itens antigos)
         self.draw_static_track()
+
+        # Recria os recipientes de animação (trail/robot/sensors)
+        # para que o preview já use os mesmos itens da animação
+        self.reset_anim_items()
+
+        # Calcula a pose inicial: centro do gate de PARTIDA menos meia altura do robô
         segs, origin, tapeW = segments_from_json(self.track)
         gates = start_finish_lines(self.track, segs, tapeW)
+
+        # Fallback: se não houver gate ligado, usa a origem da pista
         if gates:
             (a, b, hdg), _ = gates
-            back = (self.robot.envelope.heightMM/2.0) + 10.0
-            pose = Pose(Pt((a.x+b.x)/2.0, (a.y+b.y)/2.0), hdg)
-            pos = advance_straight(pose, -back)
-            hw = self.robot.envelope.widthMM/2.0
-            hh = self.robot.envelope.heightMM/2.0
-            ang = rad(pos.headingDeg)
-            corners = [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]
-            poly = QPainterPath()
-            for i,(cx,cy) in enumerate(corners + [corners[0]]):
-                rx, ry = rot(cx, cy, ang)
-                px, py = pos.p.x + rx, pos.p.y + ry
-                if i == 0: poly.moveTo(px, py)
-                else: poly.lineTo(px, py)
-            self.scene.addPath(poly, QPen(QColor("#9e9e9e"), 1, Qt.DashLine))
+            back = (self.robot.envelope.heightMM / 2.0) + 10.0
+            pose_gate = Pose(Pt((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), hdg)
+            pos = advance_straight(pose_gate, -back)
+        else:
+            pos = origin
+
+        # Desenha o envelope do robô no item "robot"
+        hw = self.robot.envelope.widthMM / 2.0
+        hh = self.robot.envelope.heightMM / 2.0
+        ang = rad(pos.headingDeg)
+
+        corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+        poly = QPainterPath()
+        for i, (cx, cy) in enumerate(corners + [corners[0]]):
+            rx, ry = rot(cx, cy, ang)
+            px, py = pos.p.x + rx, pos.p.y + ry
+            if i == 0:
+                poly.moveTo(px, py)
+            else:
+                poly.lineTo(px, py)
+        self.anim_items["robot"].setPath(poly)
+
+        # Desenha os sensores como quadradinhos no item "sensors"
+        self.anim_items["sensors"] = []
+        for s in self.robot.sensors:
+            rx, ry = rot(s.xMM + self.robot.originXMM, s.yMM + self.robot.originYMM, ang)
+            px, py = pos.p.x + rx, pos.p.y + ry
+            sz = s.sizeMM
+            sp = QPainterPath()
+            sp.addRect(px - sz/2.0, py - sz/2.0, sz, sz)
+            self.anim_items["sensors"].append(self.scene.addPath(sp, QPen(QColor("#FFFFFF"), 1)))
+
+
+
 
     # ---------- Simulação ----------
     def on_simulate(self):
@@ -733,12 +944,12 @@ class MainWindow(QMainWindow):
         self.btn_sim.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_replay.setEnabled(False)
-    
+
         # zera contadores de “steps” e distância (distância não será mais exibida)
         self.step_count = 0
         self.sim_distance_mm = 0.0
         self.lbl_progress.setText("Steps executados: 0")
-    
+
         self.worker = SimWorker(self.track, self.robot, self.controller_fn,
                                 self.spin_vf.value(), self.spin_tau.value())
         self.worker.sig_chunk.connect(self.on_stream_chunk)
@@ -801,7 +1012,7 @@ class MainWindow(QMainWindow):
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-    def on_stream_done(self, summary: dict):
+    def on_stream_done(self, info: dict):
         """Chamado quando a simulação em thread terminou e mandou o resumo."""
         # garante que o worker realmente saiu antes de seguir
         if hasattr(self, "worker") and self.worker:
@@ -816,13 +1027,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(True)
 
-        # salva logs na pasta Logs/
-        try:
-            self._save_logs(summary)
-            self.statusBar().showMessage("Log salvo em ./Logs", 4000)
-        except Exception as e:
-            # não derruba a UI se der erro ao salvar log
-            print("Falha ao salvar log:", e)
+        self._save_last_log(info)
 
         # reinicia o replay desde o começo
         self.anim_idx = 0
@@ -880,52 +1085,66 @@ class MainWindow(QMainWindow):
         finally:
             super().closeEvent(event)
 
-
     def tick(self):
+        """Reproduz a simulação consumindo vários steps por frame (≈60 Hz)."""
         if not self.anim_steps:
-            self.timer.stop(); return
+            self.timer.stop()
+            return
 
-        # quantos steps desenhar neste frame
-        steps_this_frame = getattr(self, "anim_spf", 17)  # ~1000/60 em 1×
+        # garante que os itens existem (evita KeyError 'trail')
+        if ("trail" not in self.anim_items) or ("robot" not in self.anim_items):
+            self.reset_anim_items()
 
-        for _ in range(steps_this_frame):
+        steps_this_frame = getattr(self, "anim_spf", 17)  # ~1000/60 a 1×
+
+        for _ in range(max(1, steps_this_frame)):
             i = self.anim_idx
             if i >= len(self.anim_steps):
                 self.timer.stop()
-                break
+                return
 
             step = self.anim_steps[i]
-            x, y, h = step["x_mm"], step["y_mm"], step["heading_deg"]
+            x = float(step.get("x_mm", 0.0))
+            y = float(step.get("y_mm", 0.0))
+            h = float(step.get("heading_deg", 0.0))
+
+            # tempo simulado exibido em tempo real
+            sim_t_s = i * 0.001
+            self.lbl_time.setText(f"Tempo sim: {sim_t_s:.2f} s | Vel. anim: {self.anim_speed:.1f}×")
 
             # trilha
-            trail: QPainterPath = self.anim_items["trail"].path()
+            trail = self.anim_items["trail"].path()
             if trail.elementCount() == 0:
                 trail.moveTo(x, y)
             else:
                 trail.lineTo(x, y)
             self.anim_items["trail"].setPath(trail)
 
-            # robô (retângulo) + sensores
+            # envelope do robô
             if self.robot:
-                hw = self.robot.envelope.widthMM/2.0
-                hh = self.robot.envelope.heightMM/2.0
+                hw = self.robot.envelope.widthMM / 2.0
+                hh = self.robot.envelope.heightMM / 2.0
                 ang = rad(h)
-                corners = [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]
+                corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
                 poly = QPainterPath()
-                for idx,(cx,cy) in enumerate(corners + [corners[0]]):
+                for k, (cx, cy) in enumerate(corners + [corners[0]]):
                     rx, ry = rot(cx, cy, ang)
                     px, py = x + rx, y + ry
-                    if idx == 0: poly.moveTo(px, py)
-                    else: poly.lineTo(px, py)
+                    if k == 0:
+                        poly.moveTo(px, py)
+                    else:
+                        poly.lineTo(px, py)
                 self.anim_items["robot"].setPath(poly)
 
+                # sensores
                 for k, s in enumerate(self.robot.sensors):
-                    rx, ry = rot(s.xMM + self.robot.originXMM, s.yMM + self.robot.originYMM, ang)
-                    px, py = x + rx, y + ry
-                    sz = s.sizeMM
+                    px, py = s.xMM - self.robot.originXMM, s.yMM - self.robot.originYMM
+                    rx, ry = rot(px, py, ang)
+                    cx, cy = x + rx, y + ry
                     sp = QPainterPath()
-                    sp.addRect(px - sz/2.0, py - sz/2.0, sz, sz)
-                    self.anim_items["sensors"][k].setPath(sp)
+                    sp.addRect(cx - 2, cy - 2, 4, 4)
+                    if k < len(self.anim_items["sensors"]):
+                        self.anim_items["sensors"][k].setPath(sp)
 
             self.anim_idx += 1
 
