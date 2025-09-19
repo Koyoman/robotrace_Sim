@@ -1,20 +1,68 @@
 # simulation.py
 from __future__ import annotations
-import os, sys, math, json, time, ctypes, importlib.util, csv
+import os, sys, math, json, csv, ctypes, importlib.util, random
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QThread, Signal, QObject, QTimer
+from PySide6.QtCore import Qt, QPointF, QThread, Signal, QTimer
 from PySide6.QtGui import QPen, QColor, QPainterPath, QPainter
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QFormLayout, QHBoxLayout, QPushButton,
-    QFileDialog, QDoubleSpinBox, QLabel, QSplitter, QGraphicsView, QGraphicsScene,
-    QProgressBar, QMessageBox, QComboBox
+    QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
+    QFileDialog, QDoubleSpinBox, QLabel, QSplitter, QGraphicsView,
+    QGraphicsScene, QProgressBar, QMessageBox, QComboBox
 )
+# -------------------------
+# Native bindings (linesim)
+# -------------------------
+from ctypes import c_double, c_int, POINTER
 
-# ======================
-# Util (geom de pista)
-# ======================
+class CPoint(ctypes.Structure):
+    _fields_ = [("x", c_double), ("y", c_double)]
+
+_here = os.path.dirname(__file__)
+_dlldir = os.path.join(_here, "utills_c")
+_dllpath = os.path.join(_dlldir, "linesim.dll")
+if sys.platform.startswith("win") and hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(_dlldir)
+_linesim = ctypes.CDLL(_dllpath)
+
+
+_linesim.envelope_contacts_tape_C.argtypes = [
+    c_double, c_double, c_double,
+    c_double, c_double,
+    POINTER(CPoint), c_int,
+    c_double, c_int
+]
+_linesim.envelope_contacts_tape_C.restype = c_int
+
+_linesim.estimate_sensor_coverage_C.argtypes = [
+    c_double, c_double,
+    POINTER(CPoint), c_int,
+    c_double, c_double, c_int
+]
+_linesim.estimate_sensor_coverage_C.restype = c_double
+
+# NOVO: batch
+_linesim.estimate_sensors_coverage_batch_C = getattr(_linesim, "estimate_sensors_coverage_batch_C")
+_linesim.estimate_sensors_coverage_batch_C.argtypes = [
+    POINTER(c_double), POINTER(c_double), c_int,
+    POINTER(CPoint), c_int,
+    c_double,
+    POINTER(c_double), c_double,
+    c_int,
+    POINTER(c_double)
+]
+_linesim.estimate_sensors_coverage_batch_C.restype = None
+
+_linesim.crossed_finish_C.argtypes = [
+    c_double, c_double, c_double, c_double,
+    c_double, c_double, c_double, c_double
+]
+_linesim.crossed_finish_C.restype = c_int
+
+# -------------------------
+# Geometry / track helpers
+# -------------------------
 @dataclass
 class Pt:
     x: float
@@ -28,9 +76,6 @@ class Pose:
 def rad(deg: float) -> float:
     return math.radians(deg)
 
-def deg(radv: float) -> float:
-    return math.degrees(radv)
-
 def rot(x: float, y: float, a: float) -> Tuple[float, float]:
     c, s = math.cos(a), math.sin(a)
     return (c*x - s*y, s*x + c*y)
@@ -41,28 +86,17 @@ def advance_straight(pose: Pose, d: float) -> Pose:
 
 def advance_arc(pose: Pose, R: float, sweepDeg: float) -> Pose:
     a0 = rad(pose.headingDeg)
-    # lado do centro: +1 para curva à ESQUERDA (sweep>0), -1 para DIREITA (sweep<0)
     s = 1.0 if sweepDeg >= 0.0 else -1.0
-    # vetor "esquerda" do heading
     Lx, Ly = -math.sin(a0), math.cos(a0)
-    # centro correto (esquerda ou direita conforme o sinal)
     cx = pose.p.x + s * R * Lx
     cy = pose.p.y + s * R * Ly
-
-    # ângulo polar do ponto inicial em torno do centro
     phi0 = math.atan2(pose.p.y - cy, pose.p.x - cx)
-    # avança pelo sweep (com sinal)
     phi1 = phi0 + rad(sweepDeg)
-
-    # novo ponto sobre o círculo e heading final
     x = cx + R * math.cos(phi1)
     y = cy + R * math.sin(phi1)
     return Pose(Pt(x, y), pose.headingDeg + sweepDeg)
 
-
-# ======================
-# Modelos simples
-# ======================
+# Track primitives (…mantido…) -----------------------------------------------
 @dataclass
 class SegStraight:
     kind: str
@@ -77,8 +111,6 @@ class SegArc:
     radiusMM: float
     sweepDeg: float
     from_pose: Pose
-
-AnySeg = Tuple[str, object]
 
 def segments_from_json(track: Dict[str, Any]) -> Tuple[List[object], Pose, float]:
     origin = Pose(Pt(track["origin"]["p"]["x"], track["origin"]["p"]["y"]),
@@ -96,7 +128,7 @@ def segments_from_json(track: Dict[str, Any]) -> Tuple[List[object], Pose, float
         segs.append(seg)
     return segs, origin, tapeW
 
-def segments_polyline(segs: List[object], step: float = 8.0) -> List[Pt]:
+def segments_polyline(segs: List[object], step: float = 1.0) -> List[Pt]:
     pts: List[Pt] = []
     for s in segs:
         if isinstance(s, SegStraight):
@@ -106,51 +138,34 @@ def segments_polyline(segs: List[object], step: float = 8.0) -> List[Pt]:
                 p = advance_straight(s.from_pose, s.lengthMM*t).p
                 pts.append(Pt(p.x, p.y))
         else:
-            arc = s
-            L = abs(rad(arc.sweepDeg))*arc.radiusMM
+            L = abs(rad(s.sweepDeg))*s.radiusMM
             n = max(6, int(math.ceil(L/step)))
             for i in range(n):
                 t = i/(n-1)
-                p = advance_arc(arc.from_pose, arc.radiusMM, arc.sweepDeg*t).p
+                p = advance_arc(s.from_pose, s.radiusMM, s.sweepDeg*t).p
                 pts.append(Pt(p.x, p.y))
     return pts
 
-
-# Constantes alinhadas com o editor (Utils/track_geometry.py)
-START_FINISH_GAP_MM = 1000.0     # distância entre partida e chegada (em -s)
-STRAIGHT_NEAR_XING_MM = 250.0    # afastamento de emendas de segmento
+# Constantes de desenho (…mantido…)
+START_FINISH_GAP_MM = 1000.0
+STRAIGHT_NEAR_XING_MM = 250.0
 MARKER_OFFSET_MM = 40.0
 MARKER_LENGTH_MM = 40.0
 MARKER_THICKNESS_MM = 20.0
 
-
 def curvature_change_markers(segs: List[object]) -> List[Tuple[Pt, float]]:
-    """
-    Retorna (ponto, headingDeg) sempre que a curvatura muda.
-    Inclui também a transição entre o último e o primeiro segmento
-    quando a pista é fechada (emenda final→início).
-    """
     def kappa(s: object) -> float:
-        if isinstance(s, SegArc):
-            return (1.0 if s.sweepDeg >= 0.0 else -1.0)/max(1e-9, s.radiusMM)
+        if isinstance(s, SegArc): return (1.0 if s.sweepDeg >= 0.0 else -1.0)/max(1e-9, s.radiusMM)
         return 0.0
-
     def end_pose(s: object) -> Pose:
         return advance_straight(s.from_pose, s.lengthMM) if isinstance(s, SegStraight) \
                else advance_arc(s.from_pose, s.radiusMM, s.sweepDeg)
-
     out: List[Tuple[Pt, float]] = []
-    if not segs:
-        return out
-
-    # mudanças internas
+    if not segs: return out
     for i in range(len(segs) - 1):
         a, b = segs[i], segs[i+1]
         if abs(kappa(a) - kappa(b)) > 1e-6:
-            ep = end_pose(a)
-            out.append((ep.p, ep.headingDeg))
-
-    # mudança na emenda final → início (pista fechada)
+            ep = end_pose(a); out.append((ep.p, ep.headingDeg))
     first, last = segs[0], segs[-1]
     ep_last = end_pose(last)
     is_closed = (math.hypot(ep_last.p.x - first.from_pose.p.x,
@@ -159,41 +174,34 @@ def curvature_change_markers(segs: List[object]) -> List[Tuple[Pt, float]]:
         out.append((ep_last.p, ep_last.headingDeg))
     return out
 
-
 def start_finish_lines(track: Dict[str, Any], segs: List[object], tapeW: float):
     sf = track.get("startFinish") or {}
     if not sf.get("enabled", False): return None
     segId = sf.get("onSegmentId")
     startIsFwd = sf.get("startIsForward", True)
     sParam = float(sf.get("sParamMM", 0.0))
-
     straight = next((s for s in segs if isinstance(s, SegStraight) and s.id == segId), None)
     if not straight: return None
-
-    # === clamp igual ao editor ===
     def clamp_start_on_seg(seg: SegStraight, t: float) -> float:
         mn = START_FINISH_GAP_MM + STRAIGHT_NEAR_XING_MM
         mx = seg.lengthMM - STRAIGHT_NEAR_XING_MM
         return max(mn, min(mx, t))
-
     sParam = clamp_start_on_seg(straight, sParam)
-
     def gate_at(d: float) -> Tuple[Pt, Pt, float]:
         pose = advance_straight(straight.from_pose, max(0.0, min(straight.lengthMM, d)))
         a = rad(pose.headingDeg)
-        nx, ny = -math.sin(a), math.cos(a)  # lado ESQUERDO
+        nx, ny = -math.sin(a), math.cos(a)
         half = (tapeW * 1.2) * 0.5
         ax, ay = pose.p.x + nx*half, pose.p.y + ny*half
         bx, by = pose.p.x - nx*half, pose.p.y - ny*half
         return (Pt(ax, ay), Pt(bx, by), pose.headingDeg)
-
     start_pose  = gate_at(sParam)
     finish_pose = gate_at(max(0.0, sParam - START_FINISH_GAP_MM))
     return (start_pose, finish_pose) if startIsFwd else (finish_pose, start_pose)
 
-# ======================
-# Robô
-# ======================
+# -------------------------
+# Robot
+# -------------------------
 @dataclass
 class Envelope:
     widthMM: float
@@ -222,42 +230,20 @@ class Robot:
     originYMM: float = 0.0
 
 def robot_from_json(obj: Dict[str, Any]) -> Robot:
-    """
-    Aceita os formatos:
-      {
-        "envelope": {"widthMM":..., "heightMM":...},     # preferido
-        "origin": {"xMM":..., "yMM":...},                # opcional
-        "wheels": [{"id":..., "xMM":..., "yMM":...}, ...],
-        "sensors": [{"id":..., "xMM":..., "yMM":..., "sizeMM":5.0}, ...],
-        "gridStepMM": 5.0, "originXMM": 0.0, "originYMM": 0.0
-      }
-    …ou variantes antigas sem "envelope" e/ou com origin solto.
-    """
-    # --- envelope (obrigatório no resultado; se faltar, tenta inferir) ---
     env = obj.get("envelope")
     if not env:
-        # tenta pegar campos soltos ou dentro de um "body"
         width  = obj.get("widthMM")  or (obj.get("body") or {}).get("widthMM")
         height = obj.get("heightMM") or (obj.get("body") or {}).get("heightMM")
         if width is None or height is None:
-            # fallback seguro (evita KeyError e permite visualizar algo)
             width, height = 160.0, 140.0
         env = {"widthMM": float(width), "heightMM": float(height)}
-
-    # --- origin (aceita objeto {"xMM","yMM"} ou campos soltos) ---
     ox = float(obj.get("originXMM", (obj.get("origin") or {}).get("xMM", 0.0)))
     oy = float(obj.get("originYMM", (obj.get("origin") or {}).get("yMM", 0.0)))
-
-    # --- rodas/sensores (validação leve) ---
-    if "wheels" not in obj or not obj["wheels"]:
-        raise ValueError("Arquivo de robô inválido: lista 'wheels' ausente ou vazia.")
-    if "sensors" not in obj or not obj["sensors"]:
-        raise ValueError("Arquivo de robô inválido: lista 'sensors' ausente ou vazia.")
-
+    if not obj.get("wheels"):  raise ValueError("Invalid robot file: 'wheels' list is missing/empty.")
+    if not obj.get("sensors"): raise ValueError("Invalid robot file: 'sensors' list is missing/empty.")
     wheels = [Wheel(w["id"], float(w["xMM"]), float(w["yMM"])) for w in obj["wheels"]]
     sensors = [Sensor(s["id"], float(s["xMM"]), float(s["yMM"]), float(s.get("sizeMM", 5.0)))
                for s in obj["sensors"]]
-
     return Robot(
         Envelope(float(env["widthMM"]), float(env["heightMM"])),
         wheels,
@@ -266,354 +252,366 @@ def robot_from_json(obj: Dict[str, Any]) -> Robot:
         ox, oy
     )
 
-# ======================
-# Aux de leitura de pista
-# ======================
-def point_to_polyline_distance_mm(px: float, py: float, poly: List[Pt]) -> float:
-    best = 1e18
-    for i in range(len(poly)-1):
-        ax, ay = poly[i].x, poly[i].y
-        bx, by = poly[i+1].x, poly[i+1].y
-        vx, vy = bx-ax, by-ay
-        wx, wy = px-ax, py-ay
-        L2 = vx*vx + vy*vy
-        if L2 < 1e-12:
-            d = math.hypot(px-ax, py-ay)
-        else:
-            t = max(0.0, min(1.0, (wx*vx + wy*vy)/L2))
-            cx, cy = ax + t*vx, ay + t*vy
-            d = math.hypot(px-cx, py-cy)
-        if d < best: best = d
-    return best
-
-# envelope toca a fita?
-def envelope_contacts_tape(robot: Robot, x: float, y: float, heading_deg: float,
-                           tape_poly: List[Pt], tape_w: float,
-                           grid_n: int = 9, margin_mm: float = 1.5) -> bool:
-    """
-    Retorna True se QUALQUER parte do envelope está sobre a fita.
-    Amostra uma malha grid_n x grid_n no retângulo do robô (rotacionado)
-    e faz early-exit no primeiro ponto em contato.
-    """
-    hw = robot.envelope.widthMM * 0.5
-    hh = robot.envelope.heightMM * 0.5
-    ang = rad(heading_deg)
-    half = tape_w * 0.5 + margin_mm  # margem anti-erro numérico
-
-    if grid_n < 3:
-        grid_n = 3
-
-    for iy in range(grid_n):
-        ly = -hh + (2.0 * hh) * (iy / (grid_n - 1))
-        for ix in range(grid_n):
-            lx = -hw + (2.0 * hw) * (ix / (grid_n - 1))
-            rx, ry = rot(lx, ly, ang)
-            px, py = x + rx, y + ry
-            if point_to_polyline_distance_mm(px, py, tape_poly) <= half:
-                return True
-    return False
-
-
-def estimate_sensor_coverage(px: float, py: float, tape_poly: List[Pt], tape_w: float, sensor_size: float) -> float:
-    n = 5
-    step = sensor_size/(n-1)
-    half = tape_w*0.5
-    inside = 0
-    for iy in range(n):
-        for ix in range(n):
-            sx = px + (ix - (n-1)/2.0)*step
-            sy = py + (iy - (n-1)/2.0)*step
-            if point_to_polyline_distance_mm(sx, sy, tape_poly) <= half:
-                inside += 1
-    return inside/(n*n)
-
-def sensor_value_from_coverage(cov: float) -> int:
+# -------------------------
+# Sensor utility (valores 8-bit “duas faixas” com ruído)
+# -------------------------
+def sensor_value_from_coverage_random(cov: float) -> int:
     cov = max(0.0, min(1.0, cov))
     if cov >= 0.5:
-        return min(255, max(200, 200 + int(round(cov * 55))))
+        return random.randint(0, 100)
     else:
-        return min(100, max(0, int(round(cov * 100))))
+        return random.randint(200, 255)
 
-# ======================
-# Controlador (plugin)
-# ======================
+# -------------------------
+# Controller loading
+# -------------------------
 def load_python_controller(path: str):
     spec = importlib.util.spec_from_file_location("controller_mod", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(mod)  # type: ignore
     if not hasattr(mod, "control_step"):
-        raise ValueError("Controlador Python deve definir control_step(state)->{'pwm_left','pwm_right'}.")
+        raise ValueError("Python controller must define control_step(state)->{'pwm_left','pwm_right'}.")
     return mod.control_step
 
 def import_controller(path: str):
     ext = os.path.splitext(path)[1].lower()
     if ext == ".py": return load_python_controller(path)
-    raise ValueError("Somente .py aqui para simplificar; adicione .so/.dll se precisar.")
+    raise ValueError("Only .py is supported here (add .so/.dll if needed).")
 
-# --- coloque este helper acima da classe SimWorker ---
-def _orient(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> float:
-    # área orientada do triângulo (a,b,c): >0 anti-horário, <0 horário, =0 colinear
-    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+# -------------------------
+# Simulation logger (CSV + JSON)
+# -------------------------
+class SimLogger:
+    """Grava passos e eventos da simulação em Logs/sim_log.csv e Logs/sim_log.json."""
+    def __init__(self, base_dir: str):
+        self.base_dir = base_dir
+        os.makedirs(os.path.join(base_dir, "Logs"), exist_ok=True)
+        self.csv_path = os.path.join(base_dir, "Logs", "sim_log.csv")
+        self.json_path = os.path.join(base_dir, "Logs", "sim_log.json")
+        self.steps: list[dict] = []
+        self.events: list[dict] = []
 
-def _on_segment(ax: float, ay: float, bx: float, by: float, cx: float, cy: float) -> bool:
-    # c está no retângulo fechado [a,b] assumindo colinearidade
-    return min(ax, bx) - 1e-9 <= cx <= max(ax, bx) + 1e-9 and \
-           min(ay, by) - 1e-9 <= cy <= max(ay, by) + 1e-9
+    def log_step(self, t_ms: int, x: float, y: float, h: float,
+                 v: float, w: float, pwmL: int, pwmR: int) -> None:
+        self.steps.append({
+            "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h,
+            "v_mm_s": v, "omega_rad_s": w, "pwm_left": pwmL, "pwm_right": pwmR
+        })
 
-def segments_intersect(p1, p2, p3, p4) -> bool:
+    def log_event(self, kind: str, t_ms: int, x: float, y: float, h: float, extra: dict | None = None) -> None:
+        ev = {"event": kind, "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h}
+        if extra: ev.update(extra)
+        self.events.append(ev)
+
+    def flush(self) -> None:
+        # CSV: passos
+        try:
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["t_ms","x_mm","y_mm","heading_deg","v_mm_s","omega_rad_s","pwm_left","pwm_right"])
+                for s in self.steps:
+                    w.writerow([
+                        s["t_ms"], s["x_mm"], s["y_mm"], s["heading_deg"],
+                        s["v_mm_s"], s["omega_rad_s"], s["pwm_left"], s["pwm_right"]
+                    ])
+        except Exception as e:
+            print("CSV log error:", e)
+        # JSON: passos + eventos
+        try:
+            with open(self.json_path, "w", encoding="utf-8") as f:
+                json.dump({"steps": self.steps, "events": self.events}, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print("JSON log error:", e)
+class FinishZoneChecker:
     """
-    Retorna True se o segmento p1->p2 intersecta o segmento p3->p4.
-    p* são objetos com atributos .x e .y (ex.: Pt).
+    FSM robusta para terminar a prova:
+      - Se iniciou DENTRO, precisa sair uma vez e depois armar ao cruzar START.
+      - Se iniciou FORA, basta entrar uma vez e depois armar ao cruzar START.
+      - Termina ao cruzar FINISH quando armado.
     """
-    ax, ay = p1.x, p1.y
-    bx, by = p2.x, p2.y
-    cx, cy = p3.x, p3.y
-    dx, dy = p4.x, p4.y
+    def __init__(self, sa: Pt, sb: Pt, fa: Pt, fb: Pt, half_width=250.0, eps=3.0):
+        self.s_mid = Pt((sa.x + sb.x)/2.0, (sa.y + sb.y)/2.0)
+        self.f_mid = Pt((fa.x + fb.x)/2.0, (fa.y + fb.y)/2.0)
+        ux = self.s_mid.x - self.f_mid.x
+        uy = self.s_mid.y - self.f_mid.y
+        L = math.hypot(ux, uy) or 1.0
+        self.ux, self.uy = (ux/L, uy/L)
+        self.nx, self.ny = (-self.uy, self.ux)
+        self.L = L
+        self.HALF_W = float(half_width)
+        self.EPS = float(eps)
 
-    o1 = _orient(ax, ay, bx, by, cx, cy)
-    o2 = _orient(ax, ay, bx, by, dx, dy)
-    o3 = _orient(cx, cy, dx, dy, ax, ay)
-    o4 = _orient(cx, cy, dx, dy, bx, by)
+        # estado
+        self.started_inside = False
+        self.last_inside = False
+        self.exited_once = False
+        self.entered_once = False
+        self.armed = False
+        self.last_event: Optional[str] = None
 
-    # caso geral
-    if (o1 * o2) < 0.0 and (o3 * o4) < 0.0:
+        # cruzamentos
+        self._cross = _linesim.crossed_finish_C
+        self._sa, self._sb = sa, sb
+        self._fa, self._fb = fa, fb
+
+        # (opcional) pós-FINISH: exigir envelope dentro por alguns ms (debounce)
+        self._finish_cross_t_ms: Optional[int] = None
+        self._require_envelope_ms = 0
+
+    def prime(self, cx: float, cy: float) -> None:
+        self.started_inside = self._point_inside(cx, cy)
+        self.last_inside = self.started_inside
+        # Se começou FORA, já consideramos "saiu uma vez" (não precisa sair)
+        self.exited_once = (not self.started_inside)
+        self.entered_once = self.started_inside
+        self.armed = False
+        self.last_event = "init_inside" if self.started_inside else "init_outside"
+
+    def _proj_t(self, x: float, y: float) -> float:
+        vx, vy = x - self.f_mid.x, y - self.f_mid.y
+        return vx*self.ux + vy*self.uy
+
+    def _proj_w(self, x: float, y: float) -> float:
+        vx, vy = x - self.f_mid.x, y - self.f_mid.y
+        return vx*self.nx + vy*self.ny
+
+    def _point_inside(self, x: float, y: float) -> bool:
+        t = self._proj_t(x, y); w = abs(self._proj_w(x, y))
+        return (-self.EPS <= t <= self.L + self.EPS) and (w <= self.HALF_W + self.EPS)
+
+    def _envelope_inside(self, cx, cy, heading_deg, env_w, env_h) -> bool:
+        hw, hh = env_w*0.5, env_h*0.5
+        ang = math.radians(heading_deg)
+        for (lx, ly) in [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]:
+            rx, ry = rot(lx, ly, ang); px, py = cx+rx, cy+ry
+            if not self._point_inside(px, py): return False
         return True
-    # casos colineares (com tolerância)
-    eps = 1e-9
-    if abs(o1) <= eps and _on_segment(ax, ay, bx, by, cx, cy): return True
-    if abs(o2) <= eps and _on_segment(ax, ay, bx, by, dx, dy): return True
-    if abs(o3) <= eps and _on_segment(cx, cy, dx, dy, ax, ay): return True
-    if abs(o4) <= eps and _on_segment(cx, cy, dx, dy, bx, by): return True
-    return False
 
-# ======================
-# Worker de simulação
-# ======================
+    def update(self, prev_pose, curr_pose, env_w, env_h, t_ms: Optional[int] = None) -> bool:
+        self.last_event = None
+        px0, py0, _ = prev_pose
+        px1, py1, h1 = curr_pose
+
+        prev_inside = self.last_inside          # <-- guarda o estado anterior
+        inside_now = self._point_inside(px1, py1)
+
+        # Detecta enter/exit
+        if (not prev_inside) and inside_now:
+            self.entered_once = True
+            self.last_event = "entered_zone"
+        elif prev_inside and (not inside_now):
+            self.exited_once = True
+            self.last_event = "exited_zone"
+
+        # Armar: basta ter saído e entrado (ciclo completo)
+        if (not self.armed) and self.exited_once and self.entered_once:
+            self.armed = True
+            # evita sobrescrever o "entered_zone"/"exited_zone" do mesmo passo
+            if self.last_event is None:
+                self.last_event = "armed"
+
+        # Finalizar: primeira reentrada após estar armado
+        if self.armed and (not prev_inside) and inside_now:
+            self.last_event = "finish"
+            self.last_inside = inside_now       # atualiza antes de sair
+            return True
+
+        self.last_inside = inside_now           # <-- só atualiza no fim
+        return False
+
+# -------------------------
+# Simulation worker thread
+# -------------------------
 class SimWorker(QThread):
-    sig_chunk = Signal(list)     # lista de steps (parcial)
-    sig_done  = Signal(dict)     # resumo
+    sig_chunk = Signal(list)
+    sig_done  = Signal(dict)
     sig_fail  = Signal(str)
 
     def __init__(self, track: Dict[str, Any], robot: Robot, controller_fn,
-                 v_final_mps: float, tau_s: float, parent=None):
+                v_final_mps: float, tau_s: float, parent=None):
         super().__init__(parent)
         self.track = track
         self.robot = robot
         self.controller_fn = controller_fn
-        self.v_final = float(v_final_mps)*1000.0  # mm/s
+        self.v_final = float(v_final_mps)*1000.0  # mm/s @ PWM=4095
         self.tau = max(1e-6, float(tau_s))
         self.cancelled = False
-        self.track_length_mm: float = 0.0
-        self.sim_distance_mm: float = 0.0  # acumulada durante a sim
+
+        # NEW: logger
+        self.logger = SimLogger(base_dir=_here)
 
     def run(self):
         try:
+            # Track
             segs, origin, tapeW = segments_from_json(self.track)
-            tape_poly = segments_polyline(segs, step=4.0)  # polilinha mais densa reduz erros de distância
+            poly = segments_polyline(segs, step=1.0)
+            _poly_arr = (CPoint * len(poly))(*(CPoint(p.x, p.y) for p in poly))
+            _poly_ptr = ctypes.cast(_poly_arr, POINTER(CPoint))
+            _poly_n   = len(poly)
 
-            # partida/chegada
+            # Start/Finish
             gates = start_finish_lines(self.track, segs, tapeW)
             start_gate, finish_gate = (None, None) if (gates is None) else gates
 
-            # posição inicial (logo ANTES da partida, voltado para frente)
+            # Pose inicial: atrás da START
             if start_gate is None:
-                x0, y0, h0 = origin.p.x, origin.p.y, origin.headingDeg
+                x, y, h = origin.p.x, origin.p.y, origin.headingDeg
+                sa = sb = None
             else:
-                (a, b, hdg) = start_gate
+                (sa, sb, shdg) = start_gate
                 back = (self.robot.envelope.heightMM/2.0) + 10.0
-                pose = Pose(Pt((a.x+b.x)/2.0, (a.y+b.y)/2.0), hdg)
+                pose = Pose(Pt((sa.x+sb.x)/2.0, (sa.y+sb.y)/2.0), shdg)
                 start_pose = advance_straight(pose, -back)
-                x0, y0, h0 = start_pose.p.x, start_pose.p.y, start_pose.headingDeg
+                x, y, h = start_pose.p.x, start_pose.p.y, start_pose.headingDeg
 
-            # estado
-            dt = 0.001  # 1ms
-            v = 0.0
-            w = 0.0
-            x, y, h = x0, y0, h0
+            # Checker + prime
+            zone_checker: Optional[FinishZoneChecker] = None
+            if start_gate is not None and finish_gate is not None:
+                (fa, fb, _) = finish_gate
+                zone_checker = FinishZoneChecker(sa, sb, fa, fb, half_width=400.0, eps=5.0)
+                zone_checker.prime(x, y)
 
-            # PWM -> velocidade de roda
-            def pwm_to_wheel_v(pwm: int) -> float:
-                pwm = max(0, min(4095, int(pwm)))
-                return (pwm/4095.0) * self.v_final  # mm/s
+            # Estados
+            dt = 0.001
+            vL = vR = v = w = 0.0
+            prev_v = prev_w = 0.0
 
-            # distância entre rodas
             wl = next((ww for ww in self.robot.wheels if ww.id.lower() == "left"), None)
             wr = next((ww for ww in self.robot.wheels if ww.id.lower() == "right"), None)
             trackW = abs((wr.yMM if wr else 35.0) - (wl.yMM if wl else -35.0))
 
-            # --- utilitários geométricos locais ---
-            def gate_side(px: float, py: float, gate) -> int:
-                (ga, gb, _) = gate
-                vx, vy = (gb.x - ga.x), (gb.y - ga.y)
-                wx, wy = (px - ga.x), (py - ga.y)
-                s = vx*wy - vy*wx
-                return 1 if s >= 0.0 else -1  # sinal da meia-plana
+            def pwm_to_wheel_v(pwm: int) -> float:
+                pwm = max(0, min(4095, int(pwm)))
+                return (pwm/4095.0) * self.v_final
 
-            def rect_corners_world(cx: float, cy: float, heading_deg: float):
-                hw = self.robot.envelope.widthMM/2.0
-                hh = self.robot.envelope.heightMM/2.0
-                ang = rad(heading_deg)
-                corners = [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]
-                out = []
-                for lx,ly in corners:
-                    rx, ry = rot(lx, ly, ang)
-                    out.append((cx+rx, cy+ry))
-                return out
+            # Sensores (batch) buffers
+            nS = len(self.robot.sensors)
+            sens_px = (c_double * nS)()
+            sens_py = (c_double * nS)()
+            sens_sz = (c_double * nS)(*([s.sizeMM for s in self.robot.sensors]))
+            cov_out = (c_double * nS)()
 
-            # distância do ponto à RETA infinita AB
-            def point_line_dist(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
-                vx, vy = bx-ax, by-ay
-                den = math.hypot(vx, vy)
-                if den < 1e-12:
-                    return float("inf")
-                return abs(vx*(py-ay) - vy*(px-ax)) / den
-
-            # parâmetro da projeção do ponto na RETA AB (u=0 no A, u=1 no B)
-            def proj_u(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
-                vx, vy = bx-ax, by-ay
-                L2 = vx*vx + vy*vy
-                if L2 < 1e-12:
-                    return 0.0
-                return ((px-ax)*vx + (py-ay)*vy) / L2
-
-            # --- CHEGADA (pára ao encostar o PINO amarelo da chegada) -------------------
-            # prepara o pino da CHEGADA uma única vez (geometria idêntica à usada no draw)
-            finish_pin = None  # (S, E, thickness_half)
-            if finish_gate is not None:
-                ga, gb, hdg = finish_gate
-                a_rad = rad(hdg)
-                nx, ny = -math.sin(a_rad), math.cos(a_rad)  # lado ESQUERDO
-                base = (tapeW * 0.5) + MARKER_OFFSET_MM
-                # centro do gate
-                cx_gate = (ga.x + gb.x) * 0.5
-                cy_gate = (ga.y + gb.y) * 0.5
-                # ponto inicial e final do pino (segmento central do traço)
-                sx, sy = cx_gate + nx * base, cy_gate + ny * base
-                ex, ey = sx + nx * MARKER_LENGTH_MM, sy + ny * MARKER_LENGTH_MM
-                finish_pin = (Pt(sx, sy), Pt(ex, ey), MARKER_THICKNESS_MM * 0.5)
-
-            # helpers geométricos locais
-            def dist_point_to_seg(px, py, ax, ay, bx, by) -> float:
-                vx, vy = bx - ax, by - ay
-                L2 = vx * vx + vy * vy
-                if L2 < 1e-12:
-                    return math.hypot(px - ax, py - ay)
-                t = max(0.0, min(1.0, ((px - ax) * vx + (py - ay) * vy) / L2))
-                cx, cy = ax + t * vx, ay + t * vy
-                return math.hypot(px - cx, py - cy)
-
-            def envelope_corners(cx, cy, heading_deg):
-                hw = self.robot.envelope.widthMM * 0.5
-                hh = self.robot.envelope.heightMM * 0.5
-                ang = rad(heading_deg)
-                cs = [(-hw,-hh), (hw,-hh), (hw,hh), (-hw,hh)]
-                out = []
-                for lx, ly in cs:
-                    rx, ry = rot(lx, ly, ang)
-                    out.append(Pt(cx + rx, cy + ry))
-                return out  # [p0,p1,p2,p3], arestas: p0-p1, p1-p2, p2-p3, p3-p0
-
-
-
-            # loop principal
-            steps_out = []
-            max_ms = 300000  # 5 min
-            finished = False
-            reason = "timeout"
+            steps_out: List[Dict[str, Any]] = []
             CHUNK_STEPS = 100
+            MAX_MS = 300000
+            reason = "timeout"
 
-            for t_ms in range(max_ms):
+            random.seed(12345)
+
+            # LOG: início
+            self.logger.log_event("init", 0, x, y, h, {"note": "simulation started"})
+
+            for t_ms in range(MAX_MS):
                 if self.cancelled:
-                    return
+                    reason = "user_stop"
+                    self.logger.log_event("user_stop", t_ms, x, y, h, {})
+                    break
 
-                # --- sensores ---
-                a = rad(h)
-                sn_vals = []
-                for s in self.robot.sensors:
-                    rx, ry = rot(s.xMM + self.robot.originXMM, s.yMM + self.robot.originYMM, a)
-                    px, py = x + rx, y + ry
-                    cov = estimate_sensor_coverage(px, py, tape_poly, tapeW, s.sizeMM)
-                    sn_vals.append(sensor_value_from_coverage(cov))
+                # Sensores (batch)
+                a = math.radians(h); ca, sa_ = math.cos(a), math.sin(a)
+                for i, s in enumerate(self.robot.sensors):
+                    rx = ca*s.xMM - sa_*s.yMM
+                    ry = sa_*s.xMM + ca*s.yMM
+                    sens_px[i] = x + rx
+                    sens_py[i] = y + ry
 
-                # --- controlador ---
+                _linesim.estimate_sensors_coverage_batch_C(
+                    sens_px, sens_py, nS,
+                    _poly_ptr, _poly_n,
+                    tapeW*0.5,
+                    sens_sz, 5.0, 3,
+                    cov_out
+                )
+                sn_vals = [sensor_value_from_coverage_random(cov_out[i]) for i in range(nS)]
+
+                # Controller
+                a_lin = (v - prev_v) / dt
+                a_ang = (w - prev_w) / dt
                 state = {
                     "t_ms": t_ms,
                     "pose": {"x_mm": x, "y_mm": y, "heading_deg": h},
                     "vel": {"v_mm_s": v, "omega_rad_s": w},
+                    "accel": {"a_lin_mm_s2": a_lin, "alpha_rad_s2": a_ang},
                     "sensors": {"values": sn_vals}
                 }
                 ctrl = self.controller_fn(state)
                 pwmL = int(ctrl.get("pwm_left", 0))
                 pwmR = int(ctrl.get("pwm_right", 0))
 
-                # --- dinâmica 1ª ordem ---
+                # Dinâmica por roda (1ª ordem)
                 vL_cmd = pwm_to_wheel_v(pwmL)
                 vR_cmd = pwm_to_wheel_v(pwmR)
-                v_cmd = 0.5*(vL_cmd + vR_cmd)
-                w_cmd = (vR_cmd - vL_cmd)/max(1e-6, trackW)
                 alpha = 1.0 - math.exp(-dt/self.tau)
-                v += (v_cmd - v)*alpha
-                w += (w_cmd - w)*alpha
+                vL += (vL_cmd - vL)*alpha
+                vR += (vR_cmd - vR)*alpha
 
-                # integra (guarde pose anterior para detecção)
+                prev_v, prev_w = v, w
+                v = 0.5*(vL + vR)
+                w = (vR - vL)/max(1e-6, trackW)
+
+                # Integra pose
                 prev_x, prev_y, prev_h = x, y, h
                 h += math.degrees(w*dt)
-                a = rad(h)
+                a = math.radians(h)
                 x += v*dt*math.cos(a)
                 y += v*dt*math.sin(a)
 
-                steps_out.append({
-                    "t_ms": t_ms,
-                    "x_mm": x, "y_mm": y, "heading_deg": h,
-                    "v_mm_s": v, "omega_rad_s": w,
-                    "pwmL": pwmL, "pwmR": pwmR
-                })
+                # LOG: passo
+                self.logger.log_step(t_ms, x, y, h, v, w, pwmL, pwmR)
 
-                # --- detectar contato envelope × PINO da CHEGADA
-                if finish_pin is not None:
-                    S, E, half_th = finish_pin
-                    # 1) interseção de arestas do envelope com o segmento central do pino
-                    cs = envelope_corners(x, y, h)
-                    edges = [(cs[i], cs[(i+1) % 4]) for i in range(4)]
-                    touched = any(segments_intersect(a, b, S, E) for (a, b) in edges)
-
-                    # 2) ou proximidade de qualquer canto ao segmento (considera a espessura do traço)
-                    if not touched:
-                        for p in cs:
-                            if dist_point_to_seg(p.x, p.y, S.x, S.y, E.x, E.y) <= (half_th + 0.5):
-                                touched = True
-                                break
-
-                    if touched:
-                        finished = True
+                # Zona START/FINISH
+                if zone_checker is not None:
+                    finished = zone_checker.update(
+                        (prev_x, prev_y, prev_h),
+                        (x, y, h),
+                        self.robot.envelope.widthMM,
+                        self.robot.envelope.heightMM
+                    )
+                    if zone_checker.last_event:
+                        self.logger.log_event(zone_checker.last_event, t_ms, x, y, h, {})
+                    if finished:
                         reason = "finished"
                         break
 
-
-                # fora da pista?
-                if not envelope_contacts_tape(self.robot, x, y, h, tape_poly, tapeW, margin_mm=1.5):
-                    finished = True
+                # Offtrack
+                tape_half_with_margin = (tapeW * 0.5) + 5.0
+                ontrack = _linesim.envelope_contacts_tape_C(
+                    x, y, math.radians(h),
+                    self.robot.envelope.widthMM, self.robot.envelope.heightMM,
+                    _poly_ptr, _poly_n,
+                    tape_half_with_margin, 5
+                )
+                if not ontrack:
                     reason = "offtrack"
+                    self.logger.log_event("offtrack", t_ms, x, y, h, {})
                     break
 
-                # envia para UI em blocos
+                # streaming para UI
+                steps_out.append({
+                    "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h,
+                    "v_mm_s": v, "omega_rad_s": w, "pwmL": pwmL, "pwmR": pwmR
+                })
                 if len(steps_out) >= CHUNK_STEPS:
-                    self.sig_chunk.emit(steps_out)
-                    steps_out = []
+                    self.sig_chunk.emit(steps_out); steps_out = []
 
             if steps_out:
                 self.sig_chunk.emit(steps_out)
+            if reason == "timeout":
+                self.logger.log_event("timeout", t_ms, x, y, h, {})
 
-            self.sig_done.emit({"ok": True, "reason": reason if finished else "timeout"})
+            # grava log em disco
+            self.logger.flush()
 
+            self.sig_done.emit({"ok": True, "reason": reason,
+                                "csv": self.logger.csv_path, "json": self.logger.json_path})
         except Exception as e:
             self.sig_fail.emit(str(e))
 
 
-# ======================
-# Cena/View
-# ======================
+# -------------------------
+# Scene / View
+# -------------------------
 class SimScene(QGraphicsScene):
     def __init__(self):
         super().__init__()
@@ -621,6 +619,7 @@ class SimScene(QGraphicsScene):
 
     def drawBackground(self, painter: QPainter, rect):
         super().drawBackground(painter, rect)
+        # Subtle grid for spatial reference
         step = 25.0
         pen = QPen(QColor(30, 30, 30), 1)
         painter.setPen(pen)
@@ -642,57 +641,56 @@ class SimView(QGraphicsView):
         s = 1.15 if e.angleDelta().y() > 0 else 1/1.15
         self.scale(s, s)
 
-# ======================
-# Janela principal
-# ======================
+# -------------------------
+# Main window (English UI)
+# -------------------------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Line-Follower Simulator (dt=1ms)")
 
-        # dados
+        # Data
         self.track: Optional[Dict[str, Any]] = None
         self.robot: Optional[Robot] = None
         self.controller_fn = lambda state: {"pwm_left": 2000, "pwm_right": 2000}
 
-        # GUI
+        # Scene / View
         self.scene = SimScene()
         self.view = SimView(self.scene)
         self.view.setSceneRect(0, 0, 4000, 3000)
 
+        # Left panel
         left = QWidget(); form = QFormLayout(left)
 
-        self.btn_track = QPushButton("Carregar pista (.json)")
-        self.btn_robot = QPushButton("Carregar robô (.json)")
-        self.btn_ctrl  = QPushButton("Carregar controlador (.py/.so/.dll)")
+        self.btn_track = QPushButton("Load track (.json)")
+        self.btn_robot = QPushButton("Load robot (.json)")
+        self.btn_ctrl  = QPushButton("Load controller (.py)")
         self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
         self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 5.0); self.spin_tau.setValue(0.05); self.spin_tau.setSingleStep(0.01)
-        self.btn_sim   = QPushButton("Simular")
-        self.btn_stop  = QPushButton("Parar")
-        self.btn_replay= QPushButton("Rever animação")
-        self.progress  = QProgressBar(); self.progress.setValue(0)  # pode manter a barra, mas ela não será usada
+        self.btn_sim   = QPushButton("Start simulation")
+        self.btn_stop  = QPushButton("Stop")
+        self.btn_replay= QPushButton("Replay")
+        self.progress  = QProgressBar(); self.progress.setValue(0)
         self.step_count = 0
-        self.lbl_progress = QLabel("Steps executados: 0")
+        self.lbl_progress = QLabel("Executed steps: 0")
         form.addRow(self.lbl_progress)
-        self.lbl_time = QLabel("Tempo sim: 0.00 s | Vel. anim: 1.0×")
-
+        self.lbl_time = QLabel("Sim time: 0.00 s | Anim speed: 1.0×")
         form.addRow(self.lbl_time)
 
         self.combo_speed = QComboBox()
         self.combo_speed.addItems(["0.1×", "0.5×", "1×", "2×", "4×"])
-        self.combo_speed.setCurrentIndex(2)  # 1×
-        form.addRow(QLabel("Velocidade da animação"), self.combo_speed)
+        self.combo_speed.setCurrentIndex(2)
+        form.addRow(QLabel("Animation speed"), self.combo_speed)
 
         self.anim_speed = 1.0
-        self.anim_spf = 17  # ~1000/60
+        self.anim_spf = 17
         self.combo_speed.currentIndexChanged.connect(self.on_speed_change)
-
 
         form.addRow(self.btn_track)
         form.addRow(self.btn_robot)
         form.addRow(self.btn_ctrl)
-        form.addRow(QLabel("Velocidade linear final (m/s)"), self.spin_vf)
-        form.addRow(QLabel("Constante de tempo do motor τ (s)"), self.spin_tau)
+        form.addRow(QLabel("Final linear speed (m/s)"), self.spin_vf)
+        form.addRow(QLabel("Motor time constant τ (s)"), self.spin_tau)
         form.addRow(self.btn_sim)
         form.addRow(self.btn_stop)
         form.addRow(self.btn_replay)
@@ -708,7 +706,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
         self.resize(1280, 800)
 
-        # sinais
+        # Signals
         self.btn_track.clicked.connect(self.on_load_track)
         self.btn_robot.clicked.connect(self.on_load_robot)
         self.btn_ctrl.clicked.connect(self.on_load_controller)
@@ -716,105 +714,91 @@ class MainWindow(QMainWindow):
         self.btn_stop.clicked.connect(self.on_stop)
         self.btn_replay.clicked.connect(self.on_replay)
 
-        # animação
+        # Replay/animation
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.anim_idx = 0
         self.anim_steps: List[Dict[str, Any]] = []
-        self.anim_items: Dict[str, Any] = {}  # itens gráficos vivos
+        self.anim_items: Dict[str, Any] = {}
 
-        # worker
+        # Worker
         self.worker: Optional[SimWorker] = None
 
+    # ---------- UI helpers ----------
     def on_speed_change(self, idx: int):
         mapping = {0: 0.1, 1: 0.5, 2: 1.0, 3: 2.0, 4: 4.0}
         self.anim_speed = mapping.get(idx, 1.0)
-        # 1000 steps/s a 1×; com ~60 FPS => base ≈ 16.7 steps/frame
         base_spf = int(round(1000.0 / 60.0))
         self.anim_spf = max(1, int(round(base_spf * self.anim_speed)))
-        # reflete no label imediatamente (mesmo parado)
         i = self.anim_idx if self.anim_steps else 0
-        self.lbl_time.setText("Tempo sim: {:.2f} s | Vel. anim: {:.1f}×".format(i*0.001, self.anim_speed))
+        self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(i*0.001, self.anim_speed))
 
     def _save_last_log(self, info: dict) -> None:
         """
-        Salva APENAS o último log:
-        - Logs/sim_log.json  (lista de steps)
-        - Logs/sim_log.csv   (um registro por step)
-        Remove quaisquer outros .json/.csv dentro de Logs.
+        Copia os logs gerados pelo worker (que já contém steps + events)
+        para a pasta ./Logs sem alterar o conteúdo.
         """
         try:
             os.makedirs("Logs", exist_ok=True)
-            json_path = os.path.join("Logs", "sim_log.json")
-            csv_path  = os.path.join("Logs", "sim_log.csv")
 
-            # 1) JSON (mantém compatível com o que você já usa)
-            with open(json_path, "w", encoding="utf-8") as f:
-                json.dump(self.anim_steps, f, ensure_ascii=False, indent=2)
+            src_json = info.get("json")
+            src_csv  = info.get("csv")
 
-            # 2) CSV por step (t_ms, pose, velocidades, PWMs)
-            with open(csv_path, "w", newline="", encoding="utf-8") as fcsv:
-                w = csv.writer(fcsv)
-                w.writerow(["t_ms","x_mm","y_mm","heading_deg","v_mm_s","omega_rad_s","pwm_left","pwm_right"])
-                for st in self.anim_steps:
-                    w.writerow([
-                        int(st.get("t_ms", 0)),
-                        float(st.get("x_mm", 0.0)),
-                        float(st.get("y_mm", 0.0)),
-                        float(st.get("heading_deg", 0.0)),
-                        float(st.get("v_mm_s", 0.0)),
-                        float(st.get("omega_rad_s", 0.0)),
-                        int(st.get("pwmL", st.get("pwm_left", 0))),
-                        int(st.get("pwmR", st.get("pwm_right", 0))),
-                    ])
+            # Se o worker forneceu caminhos, apenas copie.
+            if src_json and os.path.isfile(src_json):
+                import shutil
+                shutil.copyfile(src_json, os.path.join("Logs", "sim_log.json"))
+            else:
+                # Fallback: grava só os passos (sem eventos) – não recomendado.
+                with open(os.path.join("Logs", "sim_log.json"), "w", encoding="utf-8") as f:
+                    json.dump(self.anim_steps, f, ensure_ascii=False, indent=2)
 
-            # 3) Limpeza: mantém só sim_log.json e sim_log.csv
-            for fn in os.listdir("Logs"):
-                if fn.lower().endswith((".json", ".csv")) and fn not in {"sim_log.json", "sim_log.csv"}:
-                    try:
-                        os.remove(os.path.join("Logs", fn))
-                    except Exception:
-                        pass
+            if src_csv and os.path.isfile(src_csv):
+                import shutil
+                shutil.copyfile(src_csv, os.path.join("Logs", "sim_log.csv"))
+            else:
+                # Fallback: gera CSV básico com passos
+                with open(os.path.join("Logs", "sim_log.csv"), "w", newline="", encoding="utf-8") as fcsv:
+                    w = csv.writer(fcsv)
+                    w.writerow(["t_ms","x_mm","y_mm","heading_deg","v_mm_s","omega_rad_s","pwm_left","pwm_right"])
+                    for st in self.anim_steps:
+                        w.writerow([
+                            int(st.get("t_ms", 0)),
+                            float(st.get("x_mm", 0.0)),
+                            float(st.get("y_mm", 0.0)),
+                            float(st.get("heading_deg", 0.0)),
+                            float(st.get("v_mm_s", 0.0)),
+                            float(st.get("omega_rad_s", 0.0)),
+                            int(st.get("pwmL", st.get("pwm_left", 0))),
+                            int(st.get("pwmR", st.get("pwm_right", 0))),
+                        ])
         except Exception as e:
-            print("Falha ao salvar log:", e)
+            print("Failed to save logs:", e)
 
 
     # ---------- Loaders ----------
     def on_load_track(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Pista", "", "JSON (*.json)")
-        if not path:
-            return
+        path, _ = QFileDialog.getOpenFileName(self, "Track file", "", "JSON (*.json)")
+        if not path: return
         with open(path, "r", encoding="utf-8") as f:
             self.track = json.load(f)
-
-        # Desenha a pista
         self.draw_static_track()
-
-        # Se já existe robô carregado, mostra o preview dele na nova pista
-        if self.robot:
-            self.draw_robot_outline_preview()
-
-        self.statusBar().showMessage(f"Pista: {os.path.basename(path)}")
+        if self.robot: self.draw_robot_outline_preview()
+        self.statusBar().showMessage(f"Track: {os.path.basename(path)}")
 
     def on_load_robot(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Carregar robô (JSON)", "", "JSON (*.json)")
-        if not path:
-            return
+        path, _ = QFileDialog.getOpenFileName(self, "Robot file", "", "JSON (*.json)")
+        if not path: return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.robot = robot_from_json(json.load(f))
-            self.statusBar().showMessage(f"Robô: {os.path.basename(path)}", 5000)
-
-            # Mostra o preview imediatamente se já houver pista carregada
-            if self.track:
-                self.draw_robot_outline_preview()
-
+            self.statusBar().showMessage(f"Robot: {os.path.basename(path)}", 5000)
+            if self.track: self.draw_robot_outline_preview()
         except Exception as e:
             self.robot = None
-            QMessageBox.critical(self, "Erro ao carregar robô",
-                                f"Falha ao ler '{os.path.basename(path)}':\n{e}")
-            # Se por acaso existir worker rodando, cancela com segurança
-            if hasattr(self, "worker") and self.worker and self.worker.isRunning():
+            QMessageBox.critical(self, "Robot load error",
+                                 f"Failed to read '{os.path.basename(path)}':\n{e}")
+            if self.worker and self.worker.isRunning():
                 try:
                     self.worker.cancelled = True
                     self.worker.wait(500)
@@ -822,14 +806,13 @@ class MainWindow(QMainWindow):
                     pass
 
     def on_load_controller(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Controlador", "", "Python (*.py);;Shared lib (*.so *.dll *.dylib)")
+        path, _ = QFileDialog.getOpenFileName(self, "Controller", "", "Python (*.py)")
         if not path: return
         self.controller_fn = import_controller(path)
-        QMessageBox.information(self, "Controlador", "Controlador carregado com sucesso.")
+        QMessageBox.information(self, "Controller", "Controller loaded successfully.")
 
-    # ---------- Desenho estático ----------
+    # ---------- Static drawing ----------
     def clear_static(self):
-        # remove tudo e limpa referências de itens animados também
         self.scene.clear()
         self.anim_items.clear()
 
@@ -837,7 +820,7 @@ class MainWindow(QMainWindow):
         if not self.track: return
         self.clear_static()
         segs, origin, tapeW = segments_from_json(self.track)
-        pts = segments_polyline(segs, step=8.0)
+        pts = segments_polyline(segs, step=1.0)
         if len(pts) >= 2:
             path = QPainterPath(QPointF(pts[0].x, pts[0].y))
             for p in pts[1:]:
@@ -845,82 +828,71 @@ class MainWindow(QMainWindow):
             self.scene.addPath(path, QPen(QColor("#f5f5f5"), tapeW, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             self.scene.addPath(path, QPen(QColor("#444444"), 1, Qt.DashLine))
 
-        # marcadores de curvatura (brancos) – lado ESQUERDO
         for (pp, hdg) in curvature_change_markers(segs):
             a = rad(hdg)
-            nx, ny = math.sin(a), -math.cos(a)   # normal p/ ESQUERDA
+            nx, ny = math.sin(a), -math.cos(a)
             base = (tapeW*0.5) + MARKER_OFFSET_MM
             ax, ay = pp.x + nx*base, pp.y + ny*base
             bx, by = ax + nx*MARKER_LENGTH_MM, ay + ny*MARKER_LENGTH_MM
             self.scene.addLine(ax, ay, bx, by, QPen(QColor("#FFFFFF"), MARKER_THICKNESS_MM, Qt.SolidLine, Qt.RoundCap))
 
-        # partida/chegada (linhas + pinos, ESQUERDA)
         gates = start_finish_lines(self.track, segs, tapeW)
         if gates:
-            for (a, b, hdg) in gates:
-                # linha do gate atravessando a fita
-                self.scene.addLine(a.x, a.y, b.x, b.y, QPen(QColor("#FFD54F"), 4))
+            (sa, sb, _), (fa, fb, _) = gates  # start_gate e finish_gate
+            # meios das barras
+            s_mid_x = (sa.x + sb.x) * 0.5; s_mid_y = (sa.y + sb.y) * 0.5
+            f_mid_x = (fa.x + fb.x) * 0.5; f_mid_y = (fa.y + fb.y) * 0.5
+            # eixo FINISH→START
+            ux = s_mid_x - f_mid_x; uy = s_mid_y - f_mid_y
+            L = math.hypot(ux, uy) or 1.0
+            nx, ny = -uy / L, ux / L  # normal
+            half = 250.0              # MESMO valor do FinishZoneChecker
 
-                # pino amarelo do lado ESQUERDO
-                a_rad = rad(hdg)
-                nx, ny = -math.sin(a_rad), math.cos(a_rad)
-                base = (tapeW * 0.5) + MARKER_OFFSET_MM
-                sx, sy = ((a.x + b.x)/2.0) + nx*base, ((a.y + b.y)/2.0) + ny*base
-                ex, ey = sx + nx*MARKER_LENGTH_MM, sy + ny*MARKER_LENGTH_MM
-                self.scene.addLine(sx, sy, ex, ey, QPen(QColor("#FFD54F"), MARKER_THICKNESS_MM, Qt.SolidLine, Qt.RoundCap))
+            # 4 cantos do retângulo (fita de chegada até start, expandida pela normal)
+            p1 = QPointF(f_mid_x + nx*half, f_mid_y + ny*half)
+            p2 = QPointF(s_mid_x + nx*half, s_mid_y + ny*half)
+            p3 = QPointF(s_mid_x - nx*half, s_mid_y - ny*half)
+            p4 = QPointF(f_mid_x - nx*half, f_mid_y - ny*half)
 
-        # --- comprimento total da pista (aprox. pela polilinha) ---
-        self.track_length_mm = 0.0
-        for i in range(len(pts)-1):
-            dx = pts[i+1].x - pts[i].x
-            dy = pts[i+1].y - pts[i].y
-            self.track_length_mm += math.hypot(dx, dy)
+            zone = QPainterPath(p1); zone.lineTo(p2); zone.lineTo(p3); zone.lineTo(p4); zone.closeSubpath()
 
-        # ajusta view
+            pen = QPen(QColor(0, 188, 212, 200), 2)      # ciano (contorno)
+            brush = QColor(0, 188, 212, 60)              # ciano translúcido (preenchimento)
+            item = self.scene.addPath(zone, pen)
+            item.setBrush(brush)
+
+        # Fit view
         self.view.fitInView(self.scene.itemsBoundingRect().adjusted(-100, -100, +100, +100), Qt.KeepAspectRatio)
 
     def draw_robot_outline_preview(self):
-        # Precisa de pista e robô para posicionar o preview
-        if not (self.track and self.robot):
-            return
-
-        # Mantém a pista na cena (isso limpa a cena e os itens antigos)
+        """Draw envelope & sensors at initial pose (behind START or at origin)."""
+        if not (self.track and self.robot): return
         self.draw_static_track()
-
-        # Recria os recipientes de animação (trail/robot/sensors)
-        # para que o preview já use os mesmos itens da animação
         self.reset_anim_items()
 
-        # Calcula a pose inicial: centro do gate de PARTIDA menos meia altura do robô
         segs, origin, tapeW = segments_from_json(self.track)
         gates = start_finish_lines(self.track, segs, tapeW)
 
-        # Fallback: se não houver gate ligado, usa a origem da pista
         if gates:
             (a, b, hdg), _ = gates
-            back = (self.robot.envelope.heightMM / 2.0) + 10.0
+            back = (self.robot.envelope.heightMM / 2.0) + 250.0
             pose_gate = Pose(Pt((a.x + b.x) / 2.0, (a.y + b.y) / 2.0), hdg)
             pos = advance_straight(pose_gate, -back)
         else:
             pos = origin
 
-        # Desenha o envelope do robô no item "robot"
         hw = self.robot.envelope.widthMM / 2.0
         hh = self.robot.envelope.heightMM / 2.0
         ang = rad(pos.headingDeg)
-
         corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
         poly = QPainterPath()
         for i, (cx, cy) in enumerate(corners + [corners[0]]):
             rx, ry = rot(cx, cy, ang)
             px, py = pos.p.x + rx, pos.p.y + ry
-            if i == 0:
-                poly.moveTo(px, py)
-            else:
-                poly.lineTo(px, py)
+            if i == 0: poly.moveTo(px, py)
+            else:      poly.lineTo(px, py)
         self.anim_items["robot"].setPath(poly)
 
-        # Desenha os sensores como quadradinhos no item "sensors"
         self.anim_items["sensors"] = []
         for s in self.robot.sensors:
             rx, ry = rot(s.xMM + self.robot.originXMM, s.yMM + self.robot.originYMM, ang)
@@ -930,120 +902,73 @@ class MainWindow(QMainWindow):
             sp.addRect(px - sz/2.0, py - sz/2.0, sz, sz)
             self.anim_items["sensors"].append(self.scene.addPath(sp, QPen(QColor("#FFFFFF"), 1)))
 
-
-
-
-    # ---------- Simulação ----------
+    # ---------- Simulation ----------
     def on_simulate(self):
         if not (self.track and self.robot):
-            QMessageBox.warning(self, "Faltando", "Carregue pista e robô.")
+            QMessageBox.warning(self, "Missing data", "Load a track and a robot.")
             return
+
+        # Reset animation buffers
         self.anim_steps.clear()
         self.anim_idx = 0
         self.progress.setValue(0)
+        self.step_count = 0
+        self.lbl_progress.setText("Executed steps: 0")
+
         self.btn_sim.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_replay.setEnabled(False)
 
-        # zera contadores de “steps” e distância (distância não será mais exibida)
-        self.step_count = 0
-        self.sim_distance_mm = 0.0
-        self.lbl_progress.setText("Steps executados: 0")
-
+        # Spawn worker
         self.worker = SimWorker(self.track, self.robot, self.controller_fn,
                                 self.spin_vf.value(), self.spin_tau.value())
         self.worker.sig_chunk.connect(self.on_stream_chunk)
         self.worker.sig_done.connect(self.on_stream_done)
         self.worker.sig_fail.connect(self.on_stream_fail)
-        self.worker.start()
-
+        self.worker.start(QThread.TimeCriticalPriority)
 
     def on_stop(self):
-        """Parar simulação/ani­mação com segurança."""
-        # para animação, se estiver rodando
+        """Hard stop: stop replay timer and cancel worker thread."""
         if self.timer.isActive():
             self.timer.stop()
-
-        # se existir um worker rodando, peça cancelamento e ESPERE ele terminar
-        if hasattr(self, "worker") and self.worker and self.worker.isRunning():
+        if self.worker and self.worker.isRunning():
             try:
                 self.worker.cancelled = True
-                self.worker.wait(2000)  # espera até 2s
+                self.worker.wait(2000)
             except Exception:
                 pass
-
-        # estado dos botões
         self.btn_sim.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(bool(self.anim_steps))
 
-
     def on_stream_chunk(self, chunk: List[dict]):
-        # guarda steps para animação
         self.anim_steps.extend(chunk)
-
-        # conta steps executados
         self.step_count += len(chunk)
-
-        # (opcional) ainda acumulo distância, caso queira usar depois
-        for step in chunk:
-            self.sim_distance_mm += float(step.get("v_mm_s", 0.0)) * 0.001
-
-        # atualiza o texto (não usamos mais a barra de progresso como %)
-        self.lbl_progress.setText(f"Steps executados: {self.step_count}")
-
-    def _save_logs(self, summary: dict) -> None:
-        """
-        Salva os passos da simulação e o resumo em ./Logs/sim_YYYYmmdd-HHMMSS.json.
-        """
-        import datetime
-        base_dir = os.path.join(os.path.dirname(__file__), "Logs")
-        os.makedirs(base_dir, exist_ok=True)
-
-        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        out_path = os.path.join(base_dir, f"sim_{ts}.json")
-
-        payload = {
-            "summary": summary,
-            "steps": self.anim_steps,  # lista de steps consumida pela animação
-        }
-
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-
+        self.lbl_progress.setText(f"Executed steps: {self.step_count}")
 
     def on_stream_done(self, info: dict):
-        """Chamado quando a simulação em thread terminou e mandou o resumo."""
-        # garante que o worker realmente saiu antes de seguir
-        if hasattr(self, "worker") and self.worker:
-            try:
-                if self.worker.isRunning():
-                    self.worker.wait(2000)
-            finally:
-                self.worker = None
+        if self.worker and self.worker.isRunning():
+            self.worker.wait(2000)
+        self.worker = None
 
-        # habilita botões e inicia a animação do replay
         self.btn_sim.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(True)
 
         self._save_last_log(info)
 
-        # reinicia o replay desde o começo
         self.anim_idx = 0
         if self.anim_steps:
-            self.timer.start(16)   # ~60 FPS
-
+            self.timer.start(16)
 
     def on_stream_fail(self, msg: str):
         self.worker = None
         self.btn_stop.setEnabled(False)
         self.btn_sim.setEnabled(True)
-        QMessageBox.critical(self, "Erro", msg)
+        QMessageBox.critical(self, "Error", msg)
 
     # ---------- Replay ----------
     def reset_anim_items(self):
-        # remove itens antigos (se existirem) e limpa refs
         for it in list(self.anim_items.values()):
             if isinstance(it, list):
                 for sub in it:
@@ -1052,50 +977,39 @@ class MainWindow(QMainWindow):
             elif it is not None:
                 self.scene.removeItem(it)
         self.anim_items.clear()
-
-        # cria novos recipientes
         self.anim_items["trail"] = self.scene.addPath(QPainterPath(), QPen(QColor("#80CBC4"), 2))
         self.anim_items["robot"] = self.scene.addPath(QPainterPath(), QPen(QColor("#FFEB3B"), 2))
         self.anim_items["sensors"] = []
-
-        # cria “pinos” para sensores
         if self.robot:
             for _ in self.robot.sensors:
                 self.anim_items["sensors"].append(self.scene.addPath(QPainterPath(), QPen(QColor("#FFFFFF"), 1)))
 
     def on_replay(self):
-        if not self.anim_steps:
-            return
-        # recria itens SEM limpar a cena toda (evita invalidar refs)
+        if not self.anim_steps: return
         self.reset_anim_items()
         self.anim_idx = 0
-        self.timer.start(16)  # ~60 FPS
+        self.timer.start(16)
 
     def closeEvent(self, event):
-        """
-        Garante que nenhuma thread de simulação fique viva ao fechar a janela.
-        Evita 'QThread: Destroyed while thread is still running'.
-        """
         try:
             if self.timer.isActive():
                 self.timer.stop()
-            if hasattr(self, "worker") and self.worker and self.worker.isRunning():
+            if self.worker and self.worker.isRunning():
                 self.worker.cancelled = True
                 self.worker.wait(2000)
         finally:
             super().closeEvent(event)
 
     def tick(self):
-        """Reproduz a simulação consumindo vários steps por frame (≈60 Hz)."""
+        """Advance the animation by N stored sim steps per frame."""
         if not self.anim_steps:
             self.timer.stop()
             return
 
-        # garante que os itens existem (evita KeyError 'trail')
         if ("trail" not in self.anim_items) or ("robot" not in self.anim_items):
             self.reset_anim_items()
 
-        steps_this_frame = getattr(self, "anim_spf", 17)  # ~1000/60 a 1×
+        steps_this_frame = getattr(self, "anim_spf", 17)
 
         for _ in range(max(1, steps_this_frame)):
             i = self.anim_idx
@@ -1108,19 +1022,14 @@ class MainWindow(QMainWindow):
             y = float(step.get("y_mm", 0.0))
             h = float(step.get("heading_deg", 0.0))
 
-            # tempo simulado exibido em tempo real
             sim_t_s = i * 0.001
-            self.lbl_time.setText(f"Tempo sim: {sim_t_s:.2f} s | Vel. anim: {self.anim_speed:.1f}×")
+            self.lbl_time.setText(f"Sim time: {sim_t_s:.2f} s | Anim speed: {self.anim_speed:.1f}×")
 
-            # trilha
             trail = self.anim_items["trail"].path()
-            if trail.elementCount() == 0:
-                trail.moveTo(x, y)
-            else:
-                trail.lineTo(x, y)
+            if trail.elementCount() == 0: trail.moveTo(x, y)
+            else:                          trail.lineTo(x, y)
             self.anim_items["trail"].setPath(trail)
 
-            # envelope do robô
             if self.robot:
                 hw = self.robot.envelope.widthMM / 2.0
                 hh = self.robot.envelope.heightMM / 2.0
@@ -1130,13 +1039,10 @@ class MainWindow(QMainWindow):
                 for k, (cx, cy) in enumerate(corners + [corners[0]]):
                     rx, ry = rot(cx, cy, ang)
                     px, py = x + rx, y + ry
-                    if k == 0:
-                        poly.moveTo(px, py)
-                    else:
-                        poly.lineTo(px, py)
+                    if k == 0: poly.moveTo(px, py)
+                    else:      poly.lineTo(px, py)
                 self.anim_items["robot"].setPath(poly)
 
-                # sensores
                 for k, s in enumerate(self.robot.sensors):
                     px, py = s.xMM - self.robot.originXMM, s.yMM - self.robot.originYMM
                     rx, ry = rot(px, py, ang)
@@ -1148,13 +1054,12 @@ class MainWindow(QMainWindow):
 
             self.anim_idx += 1
 
-        # atualiza label após consumir os steps deste frame
         sim_t_s = (self.anim_idx * 0.001)
-        self.lbl_time.setText("Tempo sim: {:.2f} s | Vel. anim: {:.1f}×".format(sim_t_s, self.anim_speed))
+        self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(sim_t_s, self.anim_speed))
 
-# ======================
+# -------------------------
 # Main
-# ======================
+# -------------------------
 def main():
     app = QApplication(sys.argv)
     win = MainWindow()

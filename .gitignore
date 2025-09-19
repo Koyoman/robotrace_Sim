@@ -208,4 +208,8 @@ __marimo__/
 
 # --- Custom ---
 /Logs/*.json
+/Logs/*.csv
 /*.json
+*.obj
+*.exp
+*.lib
