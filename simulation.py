@@ -511,7 +511,7 @@ class SimWorker(QThread):
         self.robot = robot
         self.controller_fn = controller_fn
         self.v_final = float(v_final_mps)*1000.0  # mm/s @ PWM=4095
-        self.tau = max(1e-6, float(tau_s))
+        self.tau = max(0.001, min(0.100, float(tau_s)))
         self.dt_s = max(0.0005, min(0.1, float(dt_s)))  # clamp to 0.5 ms .. 100 ms for safety
         self.cancelled = False
 
@@ -839,7 +839,7 @@ class MainWindow(QMainWindow):
         self.btn_robot = QPushButton("Load robot (.json)")
         self.btn_ctrl  = QPushButton("Load controller (.py)")
         self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
-        self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 5.0); self.spin_tau.setValue(0.05); self.spin_tau.setSingleStep(0.01)
+        self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 0.100); self.spin_tau.setDecimals(3); self.spin_tau.setSingleStep(0.001); self.spin_tau.setValue(0.010)
 
         # New: integration step control (ms)
         self.spin_dt  = QDoubleSpinBox()
@@ -873,7 +873,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.btn_robot)
         form.addRow(self.btn_ctrl)
         form.addRow(QLabel("Final linear speed (m/s)"), self.spin_vf)
-        form.addRow(QLabel("Motor time constant τ (s)"), self.spin_tau)
+        form.addRow(QLabel("Motor time constant τ (s, 1-100ms)"), self.spin_tau)
         form.addRow(QLabel("Integration step dt (ms)"), self.spin_dt)
         form.addRow(self.chk_log)
         form.addRow(self.btn_sim)
