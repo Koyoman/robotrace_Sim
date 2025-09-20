@@ -594,7 +594,7 @@ class SimWorker(QThread):
             trackW = abs((wr.yMM if wr else 35.0) - (wl.yMM if wl else -35.0))
 
             def pwm_to_wheel_v(pwm: int) -> float:
-                pwm = max(0, min(4095, int(pwm)))
+                pwm = max(-4095, min(4095, int(pwm)))
                 return (pwm/4095.0) * self.v_final
 
             # Sensor buffers (batch)
