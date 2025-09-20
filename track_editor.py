@@ -20,8 +20,9 @@ from Utils.track_geometry import (
 from Utils.track_model import TrackModel, StartFinishCfg
 
 
-# ---------- Cena ----------
+# ---------- Scene ----------
 class TrackScene(QGraphicsScene):
+    """Draws the track, curvature markers, and start/finish gates."""
     def __init__(self, model: TrackModel):
         super().__init__()
         self.model = model
@@ -33,6 +34,7 @@ class TrackScene(QGraphicsScene):
 
     def drawBackground(self, painter: QPainter, rect):
         super().drawBackground(painter, rect)
+        # Subtle grid based on model grid step
         step = max(5.0, self.model.gridStepMM)
         pen = QPen(QColor(25, 25, 25), 1)
         painter.setPen(pen)
@@ -50,9 +52,10 @@ class TrackScene(QGraphicsScene):
         t.setPos(x, y)
 
     def rebuild(self):
+        """Regenerate all scene items from the current model state."""
         self.clear()
 
-        # segmentos com poses
+        # Build segments with absolute poses
         cur = self.model.origin
         segs: list[AnySeg] = []
         seg_paths: list[QPainterPath] = []
@@ -70,7 +73,7 @@ class TrackScene(QGraphicsScene):
             seg_paths.append(path)
             segs.append(seg)
 
-        # pista completa
+        # Full track polyline
         pts = segments_to_polyline(segs)
         if len(pts) >= 2:
             full = QPainterPath(QPointF(pts[0].x, pts[0].y))
@@ -80,7 +83,7 @@ class TrackScene(QGraphicsScene):
                                     Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             self.addPath(full, QPen(QColor("#444444"), 1, Qt.DashLine))
 
-        # marcadores de curvatura (ESQUERDA)
+        # Curvature-change markers (left side of the track)
         for (p, hdg) in curvature_change_markers(segs):
             hrad = rad(hdg)
             nx, ny = math.sin(hrad), -math.cos(hrad)
@@ -90,7 +93,7 @@ class TrackScene(QGraphicsScene):
             self.addLine(ax, ay, bx, by, QPen(QColor("#FFFFFF"), MARKER_THICKNESS_MM,
                                               Qt.SolidLine, Qt.RoundCap))
 
-        # partida/chegada (ESQUERDA; chegada atrás)
+        # Start/Finish gates and their right-side ticks
         if self.model.startFinish.enabled and self.model.startFinish.onSegmentId:
             seg = next((s for s in segs if isinstance(s, SegStraight) and s.id == self.model.startFinish.onSegmentId), None)
             if seg:
@@ -98,11 +101,12 @@ class TrackScene(QGraphicsScene):
                 start_pose = advance_straight(seg.from_pose, t)
                 finish_pose = advance_straight(seg.from_pose, max(0.0, t - START_FINISH_GAP_MM))
 
-                mapping = ((start_pose, "Partida"), (finish_pose, "Chegada")) \
+                mapping = ((start_pose, "Start"), (finish_pose, "Finish")) \
                           if self.model.startFinish.startIsForward else \
-                          ((finish_pose, "Partida"), (start_pose, "Chegada"))
+                          ((finish_pose, "Start"), (start_pose, "Finish"))
 
                 for gate_pose, label in mapping:
+                    # Cross bar
                     hrad = rad(gate_pose.headingDeg)
                     nx, ny = -math.sin(hrad), math.cos(hrad)
                     half = (self.model.tapeWidthMM * 1.2) * 0.5
@@ -110,18 +114,19 @@ class TrackScene(QGraphicsScene):
                     bx, by = gate_pose.p.x - nx*half, gate_pose.p.y - ny*half
                     self.addLine(ax, ay, bx, by, QPen(QColor("#FFD54F"), 4))
 
+                    # Right-side tick (visual asymmetry to distinguish sides)
                     base = (self.model.tapeWidthMM * 0.5) + MARKER_OFFSET_MM
                     sx, sy = gate_pose.p.x + nx*base, gate_pose.p.y + ny*base
                     ex, ey = sx + nx*MARKER_LENGTH_MM, sy + ny*MARKER_LENGTH_MM
                     self.addLine(sx, sy, ex, ey, QPen(QColor("#FFD54F"), MARKER_THICKNESS_MM,
                                                       Qt.SolidLine, Qt.RoundCap))
 
-                    # rótulo
+                    # Label near the bar
                     cx, cy = (ax+bx)/2.0, (ay+by)/2.0
                     lx, ly = cx + nx*14, cy + ny*14
                     self._add_label(label, lx, ly, QColor("#FFD54F"))
 
-        # destaque do segmento selecionado
+        # Highlight currently selected segment
         if self.highlight_index is not None and 0 <= self.highlight_index < len(seg_paths):
             self.addPath(seg_paths[self.highlight_index], QPen(QColor("#00E5FF"), 3, Qt.DashLine))
 
@@ -135,10 +140,11 @@ class TrackView(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
 
     def wheelEvent(self, event):
-        self.scale(1.15 if event.angleDelta().y() > 0 else 1/1.15, 1.15 if event.angleDelta().y() > 0 else 1/1.15)
+        s = 1.15 if event.angleDelta().y() > 0 else 1/1.15
+        self.scale(s, s)
 
 
-# ---------- Main ----------
+# ---------- Main Window ----------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -152,65 +158,65 @@ class MainWindow(QMainWindow):
 
         controls = QWidget(); form = QFormLayout(controls)
 
-        # Área
+        # Area
         self.spin_area_w = QDoubleSpinBox(); self.spin_area_w.setRange(100, 100000); self.spin_area_w.setValue(self.model.area_widthMM)
         self.spin_area_h = QDoubleSpinBox(); self.spin_area_h.setRange(100, 100000); self.spin_area_h.setValue(self.model.area_heightMM)
         self.spin_grid   = QDoubleSpinBox(); self.spin_grid.setRange(5, 1000); self.spin_grid.setValue(self.model.gridStepMM)
         self.spin_tape   = QDoubleSpinBox(); self.spin_tape.setRange(1, 1000); self.spin_tape.setValue(self.model.tapeWidthMM)
 
-        # Origem
+        # Origin
         self.spin_ox = QDoubleSpinBox(); self.spin_ox.setRange(-100000,100000); self.spin_ox.setValue(self.model.origin.p.x)
         self.spin_oy = QDoubleSpinBox(); self.spin_oy.setRange(-100000,100000); self.spin_oy.setValue(self.model.origin.p.y)
         self.spin_oh = QDoubleSpinBox(); self.spin_oh.setRange(-360,360); self.spin_oh.setDecimals(1); self.spin_oh.setValue(self.model.origin.headingDeg)
 
-        form.addRow(QLabel("<b>Área (mm)</b>"))
-        form.addRow("Largura (mm)", self.spin_area_w)
-        form.addRow("Altura (mm)", self.spin_area_h)
-        form.addRow("Passo da malha (mm)", self.spin_grid)
-        form.addRow("Largura da fita (mm)", self.spin_tape)
+        form.addRow(QLabel("<b>Area (mm)</b>"))
+        form.addRow("Width (mm)", self.spin_area_w)
+        form.addRow("Height (mm)", self.spin_area_h)
+        form.addRow("Grid step (mm)", self.spin_grid)
+        form.addRow("Tape width (mm)", self.spin_tape)
 
-        form.addRow(QLabel("<b>Origem</b>"))
+        form.addRow(QLabel("<b>Origin</b>"))
         form.addRow("X (mm)", self.spin_ox)
         form.addRow("Y (mm)", self.spin_oy)
-        form.addRow("Ângulo (°)", self.spin_oh)
+        form.addRow("Angle (°)", self.spin_oh)
 
-        # Segmentos
-        form.addRow(QLabel("<b>Segmentos</b>"))
+        # Segments
+        form.addRow(QLabel("<b>Segments</b>"))
         self.list_segments = QListWidget(); form.addRow(self.list_segments)
         self.spin_length = QDoubleSpinBox(); self.spin_length.setRange(1, 1e6)
         self.spin_radius = QDoubleSpinBox(); self.spin_radius.setRange(1, 1e6)
         self.spin_sweep  = QDoubleSpinBox(); self.spin_sweep.setRange(-1080,1080); self.spin_sweep.setDecimals(1)
-        form.addRow("Comprimento (reta)", self.spin_length)
-        form.addRow("Raio (arco)", self.spin_radius)
-        form.addRow("Varredura (°)", self.spin_sweep)
+        form.addRow("Length (straight)", self.spin_length)
+        form.addRow("Radius (arc)", self.spin_radius)
+        form.addRow("Sweep (°)", self.spin_sweep)
 
         row_btns = QHBoxLayout()
-        self.btn_add_st = QPushButton("Add Reta")
-        self.btn_add_ar = QPushButton("Add Arco")
-        self.btn_del    = QPushButton("Remover")
-        self.btn_ren    = QPushButton("Renomear (F2)")
+        self.btn_add_st = QPushButton("Add Straight")
+        self.btn_add_ar = QPushButton("Add Arc")
+        self.btn_del    = QPushButton("Remove")
+        self.btn_ren    = QPushButton("Rename (F2)")
         row_btns.addWidget(self.btn_add_st); row_btns.addWidget(self.btn_add_ar); row_btns.addWidget(self.btn_del); row_btns.addWidget(self.btn_ren)
         form.addRow(row_btns)
 
         # Start/Finish
-        form.addRow(QLabel("<b>Partida/Chegada</b>"))
-        self.chk_sf = QCheckBox("Ativar Partida/Chegada")
+        form.addRow(QLabel("<b>Start/Finish</b>"))
+        self.chk_sf = QCheckBox("Enable Start/Finish")
         self.combo_sf_seg = QComboBox()
         self.spin_sf_s = QDoubleSpinBox(); self.spin_sf_s.setRange(0, 1000000); self.spin_sf_s.setValue(500.0)
         self.slider_sf = QSlider(Qt.Horizontal); self.slider_sf.setRange(0, 10000)
-        self.chk_sf_forward = QCheckBox("Partida é adiante (+s)")
+        self.chk_sf_forward = QCheckBox("Start is forward (+s)")
         form.addRow(self.chk_sf)
-        form.addRow("Segmento (reta)", self.combo_sf_seg)
-        form.addRow("Posição s (mm)", self.spin_sf_s)
-        form.addRow("Ajuste fino s", self.slider_sf)
+        form.addRow("Segment (straight)", self.combo_sf_seg)
+        form.addRow("s position (mm)", self.spin_sf_s)
+        form.addRow("Fine adjust s", self.slider_sf)
         form.addRow(self.chk_sf_forward)
 
-        # Arquivo
+        # File actions
         row1 = QHBoxLayout(); row2 = QHBoxLayout()
-        btn_new = QPushButton("Novo")
-        btn_open = QPushButton("Importar JSON")
-        btn_save = QPushButton("Exportar JSON")
-        btn_fit  = QPushButton("Enquadrar (Fit)")
+        btn_new = QPushButton("New")
+        btn_open = QPushButton("Import JSON")
+        btn_save = QPushButton("Export JSON")
+        btn_fit  = QPushButton("Fit to View")
         row1.addWidget(btn_new); row1.addWidget(btn_open)
         row2.addWidget(btn_save); row2.addWidget(btn_fit)
         form.addRow(row1); form.addRow(row2)
@@ -221,7 +227,7 @@ class MainWindow(QMainWindow):
         splitter.setSizes([900, 360])
         self.setCentralWidget(splitter)
 
-        # Conexões
+        # Connections
         self.list_segments.currentRowChanged.connect(self.on_select_segment)
         self.spin_length.valueChanged.connect(self.apply_seg_edit)
         self.spin_radius.valueChanged.connect(self.apply_seg_edit)
@@ -252,29 +258,29 @@ class MainWindow(QMainWindow):
         btn_save.clicked.connect(self.export_json)
         btn_fit.clicked.connect(self.fit_view)
 
-        # Atalhos
-        act_open = QAction("Importar", self); act_open.setShortcut("Ctrl+O"); act_open.triggered.connect(self.import_json); self.addAction(act_open)
-        act_save = QAction("Exportar", self); act_save.setShortcut("Ctrl+S"); act_save.triggered.connect(self.export_json); self.addAction(act_save)
+        # Shortcuts (action labels translated)
+        act_open = QAction("Import", self);  act_open.setShortcut("Ctrl+O"); act_open.triggered.connect(self.import_json); self.addAction(act_open)
+        act_save = QAction("Export", self);  act_save.setShortcut("Ctrl+S"); act_save.triggered.connect(self.export_json); self.addAction(act_save)
         act_fit  = QAction("Fit", self);     act_fit.setShortcut("Ctrl+F");  act_fit.triggered.connect(self.fit_view);    self.addAction(act_fit)
-        act_rename = QAction("Renomear", self); act_rename.setShortcut("F2"); act_rename.triggered.connect(self.rename_segment); self.addAction(act_rename)
+        act_rename = QAction("Rename", self); act_rename.setShortcut("F2");  act_rename.triggered.connect(self.rename_segment); self.addAction(act_rename)
 
         self.refresh_list()
         self.refresh_sf_combo()
         self.scene.rebuild()
         self.resize(1320, 820)
 
-    # ---------- util ----------
+    # ---------- helpers ----------
     def fmt_item(self, s: AnySeg) -> str:
         if isinstance(s, SegStraight):
-            return f"Reta  {s.id} — L={s.lengthMM:.1f} mm"
+            return f"Straight  {s.id} — L={s.lengthMM:.1f} mm"
         else:
-            return f"Arco  {s.id} — R={s.radiusMM:.1f} mm, θ={s.sweepDeg:.1f}°"
+            return f"Arc  {s.id} — R={s.radiusMM:.1f} mm, θ={s.sweepDeg:.1f}°"
 
     def fit_view(self):
         rect = QRectF(0, 0, self.model.area_widthMM, self.model.area_heightMM)
         self.view.fitInView(rect, Qt.KeepAspectRatio)
 
-    # ids
+    # id helpers
     def next_id_for(self, kind: str) -> str:
         if kind == 'straight':
             base = "R"
@@ -315,13 +321,11 @@ class MainWindow(QMainWindow):
         for s in self.model.segments:
             if isinstance(s, SegStraight):
                 self.combo_sf_seg.addItem(s.id)
-        # set atual
         sf = self.model.startFinish
         if sf.enabled and sf.onSegmentId:
             idx = self.combo_sf_seg.findText(sf.onSegmentId)
             if idx >= 0: self.combo_sf_seg.setCurrentIndex(idx)
         self.combo_sf_seg.blockSignals(False)
-        # espelha campos
         self.chk_sf.setChecked(self.model.startFinish.enabled)
         self.spin_sf_s.setValue(self.model.startFinish.sParamMM)
         self.chk_sf_forward.setChecked(self.model.startFinish.startIsForward)
@@ -379,7 +383,7 @@ class MainWindow(QMainWindow):
         if 0 <= row < len(self.model.segments):
             s = self.model.segments[row]
             old_id = s.id
-            entered, ok = QInputDialog.getText(self, "Renomear segmento", "Novo ID:", text=old_id)
+            entered, ok = QInputDialog.getText(self, "Rename segment", "New ID:", text=old_id)
             if ok and entered:
                 entered = str(entered).strip().upper()
                 digits = ''.join(ch for ch in entered if ch.isdigit())
@@ -393,7 +397,7 @@ class MainWindow(QMainWindow):
                 self.refresh_sf_combo()
                 self.scene.rebuild()
 
-    # área/origem/fita
+    # Area/origin/tape
     def on_area_change(self):
         self.model.area_widthMM = self.spin_area_w.value()
         self.model.area_heightMM = self.spin_area_h.value()
@@ -410,10 +414,10 @@ class MainWindow(QMainWindow):
 
     def on_origin_change(self):
         self.model.origin = Pose(Pt(self.spin_ox.value(), self.spin_oy.value()), self.spin_oh.value())
-        # é só referência; segmentos mantém suas poses acumuladas
+        # Origin is only a reference for visualization; segments keep their accumulated poses
         self.scene.rebuild()
 
-    # partida/chegada
+    # Start/finish controls
     def on_sf_change(self):
         sf = self.model.startFinish
         sf.enabled = self.chk_sf.isChecked()
@@ -424,18 +428,18 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_sf_slider(self, v: int):
-        # slider 0..10000 -> mapeia linear para 0..comprimento estimado
-        self.spin_sf_s.setValue(float(v))  # simples; você pode mapear por comprimento real do seg selecionado
+        # Linear mapping 0..10000 -> s in millimeters (simple; can be tied to actual segment length)
+        self.spin_sf_s.setValue(float(v))
         self.on_sf_change()
 
-    # Arquivo
+    # File I/O
     def new_file(self):
         self.model = TrackModel()
         self.scene.model = self.model
         self.refresh_list(); self.refresh_sf_combo(); self.scene.rebuild()
 
     def import_json(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Importar pista", "", "JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self, "Import track", "", "JSON (*.json)")
         if not path: return
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -444,16 +448,16 @@ class MainWindow(QMainWindow):
             self.scene.model = self.model
             self.refresh_list(); self.refresh_sf_combo(); self.scene.rebuild()
         except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Falha ao importar:\n{e}")
+            QMessageBox.critical(self, "Error", f"Import failed:\n{e}")
 
     def export_json(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Exportar pista", "track.json", "JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(self, "Export track", "track.json", "JSON (*.json)")
         if not path: return
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self.model.to_json(), f, ensure_ascii=False, indent=2)
         except Exception as e:
-            QMessageBox.critical(self, "Erro", f"Falha ao exportar:\n{e}")
+            QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
 
 
 def main():

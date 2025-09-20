@@ -21,19 +21,19 @@
       "kind": "arc",
       "id": "C1",
       "radiusMM": 300.0,
-      "sweepDeg": 180.0
+      "sweepDeg": 90.0
     },
     {
       "kind": "arc",
       "id": "C2",
       "radiusMM": 300.0,
-      "sweepDeg": -90.0
+      "sweepDeg": 90.0
     },
     {
       "kind": "arc",
       "id": "C3",
       "radiusMM": 300.0,
-      "sweepDeg": 90.0
+      "sweepDeg": -90.0
     },
     {
       "kind": "arc",
@@ -45,6 +45,12 @@
       "kind": "arc",
       "id": "C5",
       "radiusMM": 300.0,
+      "sweepDeg": 90.0
+    },
+    {
+      "kind": "arc",
+      "id": "C6",
+      "radiusMM": 300.0,
       "sweepDeg": -90.0
     },
     {
@@ -54,7 +60,7 @@
     },
     {
       "kind": "arc",
-      "id": "C6",
+      "id": "C7",
       "radiusMM": 300.0,
       "sweepDeg": 180.0
     }

@@ -1,144 +1,95 @@
-# controller_example.py — Line Follower PD com modo "busca"
-# Compatível com simulation.py (state: t_ms, pose, vel, accel, sensors.values)
+# controller_example.py — Line Follower PD com thresholds e pesos definidos
+# Formato do state (enviado pelo simulador):
+#  - t_ms
+#  - pose:   {x_mm, y_mm, heading_deg}
+#  - vel:    {v_mm_s, omega_rad_s}
+#  - accel:  {a_lin_mm_s2, alpha_rad_s2}
+#  - sensors:{values: [0..255]}
+#  - wheels: {v_left_mm_s, v_right_mm_s}   # lido mas não utilizado aqui
 
-# Estado persistente entre chamadas
-G = {
-    "prev_err": 0.0,
-    "d_filt": 0.0,
-    "lost_ms": 0,
-    "last_seen_sign": 1.0,   # +1: linha à direita; -1: à esquerda
-}
+G = {"prev_err": 0.0, "d_filt": 0.0, "last_center": 0.0}
 
-# ===== Parâmetros ajustáveis =====
-# Base de avanço. 1850 funciona bem com v_final ≈ 2.0 m/s do simulador
-BASE_PWM    = 1850
+# PWM base e ganhos (ajuste conforme necessário)
+BASE_PWM = 1850
+KP = 1300.0
+KD = 220.0
+D_ALPHA = 0.25      # filtro exponencial p/ derivada
+PWM_MIN, PWM_MAX = 0, 4095
+DT_S = 0.001
 
-# Ganhos PD
-KP          = 1300.0         # ganho proporcional
-KD          = 220.0          # ganho derivativo (dt=1ms)
-D_ALPHA     = 0.25           # suavização da derivada (0..1) — 0 = sem filtro
+# Limiares com histerese (linha = valores BAIXOS)
+TH_LO = 120.0       # <= em cima da linha
+TH_HI = 160.0       # >= fora da linha
 
-# Modo busca quando perde a linha
-SEARCH_PWM  = 900            # PWM de avanço durante busca
-SEARCH_TURN = 750            # PWM diferencial para girar procurando a fita
+def _clamp(v: float) -> int:
+    return int(PWM_MIN if v < PWM_MIN else PWM_MAX if v > PWM_MAX else v)
 
-# Limiar de “linha presente” (soma de pesos normalizados 0..1)
-# Quanto maior o número de sensores, maior a soma; esse valor funciona bem para 5~12 sensores.
-LOSS_THRESH = 0.12
+def _activation(val: float) -> float:
+    """Mapeia leitura [0..255] para ativação [0..1] (1 = em cima da linha)."""
+    if val <= TH_LO: return 1.0
+    if val >= TH_HI: return 0.0
+    # transição suave reduz efeito do ruído
+    return 1.0 - (val - TH_LO) / (TH_HI - TH_LO)
 
-# Saturação e proteção
-PWM_MIN     = 0
-PWM_MAX     = 4095
-
-# dt do simulador
-DT_S        = 0.001
-
-def _clamp_pwm(v):
-    if v < PWM_MIN: return PWM_MIN
-    if v > PWM_MAX: return PWM_MAX
-    return int(v)
-
-def _weights_from_raw(vals):
+def _weights_signed_even(n: int, step: float = 1000.0):
     """
-    Converte leituras 0..255 para pesos 0..1.
-    Pelo simulador: dentro da faixa → 0..100 ; fora → 200..255.
-    Mapeamos monotonamente: valores menores => peso maior (mais 'preto').
-    Usamos uma rampa entre [lo, hi] para suavizar ruído.
+    Para n par, cria pesos sem zero: ...,-3,-2,-1,+1,+2,+3,... (× step)
+    Ex.: n=8 -> [-4,-3,-2,-1,+1,+2,+3,+4] * 1000
+    Para n ímpar, centraliza com zero: ...,-2,-1,0,+1,+2,... (× step)
     """
-    lo, hi = 60.0, 200.0      # região de transição suave
-    ws = []
-    for v in vals:
-        if v <= lo:
-            w = 1.0
-        elif v >= hi:
-            w = 0.0
-        else:
-            # entre lo e hi cai linearmente 1→0
-            w = 1.0 - (v - lo) / (hi - lo)
-        ws.append(w)
-    return ws
-
-def _centroid_error(ws):
-    """
-    Calcula erro lateral normalizado a partir dos pesos dos sensores.
-    Considera sensores igualmente espaçados em [-1, +1] na ordem recebida.
-    Retorna (erro, soma_pesos).
-    """
-    n = len(ws)
-    if n == 0:
-        return 0.0, 0.0
-
-    if n == 1:
-        xs = [0.0]
+    if n <= 0: return []
+    half = n // 2
+    if n % 2 == 0:
+        # desloca para não ter zero
+        out = []
+        for i in range(n):
+            k = i - half
+            if i >= half:
+                k += 1
+            out.append(k * step)
+        return out
     else:
-        step = 2.0 / (n - 1)
-        xs = [-1.0 + i * step for i in range(n)]
-
-    sw = sum(ws)
-    if sw <= 1e-12:
-        return 0.0, 0.0
-
-    cx = sum(x * w for x, w in zip(xs, ws)) / sw
-    # Convenção: erro > 0 => linha à DIREITA do centro do robô
-    return cx, sw
+        return [ (i - half) * step for i in range(n) ]
 
 def control_step(state):
-    """
-    Entrada esperada:
-      state = {
-        "t_ms": int,
-        "pose": {"x_mm","y_mm","heading_deg"},
-        "vel":  {"v_mm_s","omega_rad_s"},
-        "accel":{"a_lin_mm_s2","alpha_rad_s2"},
-        "sensors": {"values": [ints 0..255]}
-      }
-    Saída:
-      {"pwm_left": int 0..4095, "pwm_right": int 0..4095}
-    """
-    vals = list(state.get("sensors", {}).get("values", []))
-    t_ms = int(state.get("t_ms", 0))
+    # velocidades de roda estão disponíveis, mas não usadas aqui
+    _ = state.get("wheels", {})
 
-    # Reset ao início de uma simulação
-    if t_ms == 0:
+    if int(state.get("t_ms", 0)) == 0:
         G["prev_err"] = 0.0
         G["d_filt"] = 0.0
-        G["lost_ms"] = 0
-        G["last_seen_sign"] = 1.0
+        G["last_center"] = 0.0
 
-    # 1) Erro a partir dos sensores
-    ws = _weights_from_raw(vals)
-    err, sumw = _centroid_error(ws)
+    vals = list(state.get("sensors", {}).get("values", []))
+    n = len(vals)
 
-    # 2) Perdeu/achou a linha?
-    lost = (sumw < LOSS_THRESH)
-    if lost:
-        G["lost_ms"] += 1
+    # ativações [0..1]
+    acts = [_activation(v) for v in vals]
+
+    # pesos — para n=8 resultará: [-4000,-3000,-2000,-1000, +1000,+2000,+3000,+4000]
+    W = _weights_signed_even(n, step=1000.0)
+
+    # centroide assinado
+    sw = sum(acts)
+    if sw <= 1e-9:
+        err = G["last_center"]          # se “perdeu” a linha, mantém direção anterior
     else:
-        G["lost_ms"] = 0
-        G["last_seen_sign"] = 1.0 if err >= 0.0 else -1.0
+        center = sum(w*a for w, a in zip(W, acts)) / sw
+        G["last_center"] = center
+        err = center                     # alvo é 0
 
-    # 3) Derivada suavizada
+    # derivada filtrada
     d_raw = (err - G["prev_err"]) / DT_S
     G["d_filt"] = (1.0 - D_ALPHA) * G["d_filt"] + D_ALPHA * d_raw
     G["prev_err"] = err
 
-    # 4) Modo busca se perdido
-    if lost:
-        # avança e gira para o último lado onde viu a linha
-        turn = SEARCH_TURN * G["last_seen_sign"]
-        left  = SEARCH_PWM - turn
-        right = SEARCH_PWM + turn
-        return {"pwm_left": _clamp_pwm(left), "pwm_right": _clamp_pwm(right)}
-
-    # 5) Controlador PD
+    # PD
     diff = KP * err + KD * G["d_filt"]
 
-    # Pequena zona morta na correção para reduzir ziguezague próximo ao centro
-    if abs(err) < 0.10:
+    # zona morta suave perto do centro
+    if abs(err) < 500.0:
         diff *= 0.6
 
-    left  = BASE_PWM - diff
-    right = BASE_PWM + diff
-
-    # 6) Saturação final
-    return {"pwm_left": _clamp_pwm(left), "pwm_right": _clamp_pwm(right)}
+    pwm_left  = _clamp(BASE_PWM - diff)
+    pwm_right = _clamp(BASE_PWM + diff)
+    return {"pwm_left": pwm_left, "pwm_right": pwm_right}
