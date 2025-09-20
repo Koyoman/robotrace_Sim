@@ -9,7 +9,7 @@ from PySide6.QtGui import QPen, QColor, QPainterPath, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
     QFileDialog, QDoubleSpinBox, QLabel, QSplitter, QGraphicsView,
-    QGraphicsScene, QProgressBar, QMessageBox, QComboBox
+    QGraphicsScene, QMessageBox, QComboBox, QCheckBox
 )
 
 # ---------- Native bindings (linesim) ----------
@@ -342,6 +342,18 @@ class SimLogger:
         except Exception as e:
             print("JSON log error:", e)
 
+class NoopLogger:
+    """No-op logger used when 'Save logs to file' is disabled."""
+    def __init__(self):
+        self.csv_path = ""
+        self.json_path = ""
+    def log_step(self, *args, **kwargs):  # noqa: D401
+        return
+    def log_event(self, *args, **kwargs):  # noqa: D401
+        return
+    def flush(self):  # noqa: D401
+        return
+
 # ---------- Finish zone checker ----------
 class FinishZoneChecker:
     """
@@ -492,7 +504,7 @@ class SimWorker(QThread):
     sig_fail  = Signal(str)
 
     def __init__(self, track: Dict[str, Any], robot: Robot, controller_fn,
-                 v_final_mps: float, tau_s: float, parent=None):
+                 v_final_mps: float, tau_s: float, save_logs: bool, parent=None):
         super().__init__(parent)
         self.track = track
         self.robot = robot
@@ -501,7 +513,8 @@ class SimWorker(QThread):
         self.tau = max(1e-6, float(tau_s))
         self.cancelled = False
 
-        self.logger = SimLogger(base_dir=_here)
+        # Select logger (file logger or no-op)
+        self.logger = SimLogger(base_dir=_here) if save_logs else NoopLogger()
         self._marker_logged = False
 
     def envelope_contacts_tape(self, x, y, h_deg, tape_half_with_margin) -> bool:
@@ -753,7 +766,8 @@ class SimWorker(QThread):
 
             self.logger.flush()
             self.sig_done.emit({"ok": True, "reason": reason,
-                                "csv": self.logger.csv_path, "json": self.logger.json_path})
+                                "csv": getattr(self.logger, "csv_path", ""),
+                                "json": getattr(self.logger, "json_path", "")})
         except Exception as e:
             self.sig_fail.emit(str(e))
 
@@ -814,10 +828,14 @@ class MainWindow(QMainWindow):
         self.btn_sim   = QPushButton("Start simulation")
         self.btn_stop  = QPushButton("Stop")
         self.btn_replay= QPushButton("Replay")
-        self.progress  = QProgressBar(); self.progress.setValue(0)
+
+        # Removed progress bar to avoid any percent-based UI.
         self.step_count = 0
         self.lbl_progress = QLabel("Executed steps: 0"); form.addRow(self.lbl_progress)
         self.lbl_time = QLabel("Sim time: 0.00 s | Anim speed: 1.0×"); form.addRow(self.lbl_time)
+
+        # New checkbox to control file logging
+        self.chk_log = QCheckBox("Save logs to file (CSV+JSON)")
 
         self.combo_speed = QComboBox()
         self.combo_speed.addItems(["0.1×", "0.5×", "1×", "2×", "4×"])
@@ -833,10 +851,10 @@ class MainWindow(QMainWindow):
         form.addRow(self.btn_ctrl)
         form.addRow(QLabel("Final linear speed (m/s)"), self.spin_vf)
         form.addRow(QLabel("Motor time constant τ (s)"), self.spin_tau)
+        form.addRow(self.chk_log)
         form.addRow(self.btn_sim)
         form.addRow(self.btn_stop)
         form.addRow(self.btn_replay)
-        form.addRow(self.progress)
 
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(False)
@@ -1116,7 +1134,6 @@ class MainWindow(QMainWindow):
         # Reset animation buffers
         self.anim_steps.clear()
         self.anim_idx = 0
-        self.progress.setValue(0)
         self.step_count = 0
         self.lbl_progress.setText("Executed steps: 0")
 
@@ -1125,9 +1142,11 @@ class MainWindow(QMainWindow):
         self.btn_replay.setEnabled(False)
         self.v_max_mm_s = self.spin_vf.value() * 1000.0
 
-        # Spawn worker
+        # Spawn worker (pass logging preference)
+        save_logs = self.chk_log.isChecked()
         self.worker = SimWorker(self.track, self.robot, self.controller_fn,
-                                self.spin_vf.value(), self.spin_tau.value())
+                                self.spin_vf.value(), self.spin_tau.value(),
+                                save_logs=save_logs)
         self.worker.sig_chunk.connect(self.on_stream_chunk)
         self.worker.sig_done.connect(self.on_stream_done)
         self.worker.sig_fail.connect(self.on_stream_fail)
