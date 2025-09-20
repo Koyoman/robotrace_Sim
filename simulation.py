@@ -504,13 +504,15 @@ class SimWorker(QThread):
     sig_fail  = Signal(str)
 
     def __init__(self, track: Dict[str, Any], robot: Robot, controller_fn,
-                 v_final_mps: float, tau_s: float, save_logs: bool, parent=None):
+                 v_final_mps: float, tau_s: float, save_logs: bool,
+                 dt_s: float, parent=None):
         super().__init__(parent)
         self.track = track
         self.robot = robot
         self.controller_fn = controller_fn
         self.v_final = float(v_final_mps)*1000.0  # mm/s @ PWM=4095
         self.tau = max(1e-6, float(tau_s))
+        self.dt_s = max(0.0005, min(0.1, float(dt_s)))  # clamp to 0.5 ms .. 100 ms for safety
         self.cancelled = False
 
         # Select logger (file logger or no-op)
@@ -598,7 +600,7 @@ class SimWorker(QThread):
                 zone_checker.prime(x, y)
 
             # States
-            dt = 0.001
+            dt = self.dt_s
             vL = vR = v = w = 0.0
             prev_v = prev_w = 0.0
 
@@ -619,7 +621,7 @@ class SimWorker(QThread):
 
             steps_out: List[Dict[str, Any]] = []
             CHUNK_STEPS = 100
-            MAX_MS = 300000
+            MAX_MS = 300000  # stop after ~5 minutes of simulated time
             reason = "timeout"
 
             random.seed(datetime.now().timestamp())
@@ -632,7 +634,11 @@ class SimWorker(QThread):
 
             enter_t_ms = None
 
-            for t_ms in range(MAX_MS):
+            # Time accumulator (supports arbitrary dt)
+            t_s = 0.0
+            t_ms = 0
+
+            while t_ms < MAX_MS:
                 if self.cancelled:
                     reason = "user_stop"
                     self.logger.log_event("user_stop", t_ms, x, y, h, {})
@@ -732,7 +738,8 @@ class SimWorker(QThread):
                         (prev_x, prev_y, prev_h),
                         (x, y, h),
                         self.robot.envelope.widthMM,
-                        self.robot.envelope.heightMM
+                        self.robot.envelope.heightMM,
+                        t_ms
                     )
                     if zone_checker.last_event:
                         self.logger.log_event(zone_checker.last_event, t_ms, x, y, h, {})
@@ -759,15 +766,23 @@ class SimWorker(QThread):
                 if len(steps_out) >= CHUNK_STEPS:
                     self.sig_chunk.emit(steps_out); steps_out = []
 
+                # Advance time
+                t_s += dt
+                t_ms = int(round(t_s * 1000.0))
+
             if steps_out:
                 self.sig_chunk.emit(steps_out)
             if reason == "timeout":
                 self.logger.log_event("timeout", t_ms, x, y, h, {})
 
             self.logger.flush()
-            self.sig_done.emit({"ok": True, "reason": reason,
-                                "csv": getattr(self.logger, "csv_path", ""),
-                                "json": getattr(self.logger, "json_path", "")})
+            self.sig_done.emit({
+                "ok": True,
+                "reason": reason,
+                "csv": getattr(self.logger, "csv_path", ""),
+                "json": getattr(self.logger, "json_path", ""),
+                "dt_s": self.dt_s  # let UI know which dt was used
+            })
         except Exception as e:
             self.sig_fail.emit(str(e))
 
@@ -805,7 +820,7 @@ class SimView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Line-Follower Simulator (dt = 1 ms)")
+        self.setWindowTitle("Line-Follower Simulator")
 
         # Data
         self.track: Optional[Dict[str, Any]] = None
@@ -825,6 +840,14 @@ class MainWindow(QMainWindow):
         self.btn_ctrl  = QPushButton("Load controller (.py)")
         self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
         self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 5.0); self.spin_tau.setValue(0.05); self.spin_tau.setSingleStep(0.01)
+
+        # New: integration step control (ms)
+        self.spin_dt  = QDoubleSpinBox()
+        self.spin_dt.setRange(0.5, 100.0)
+        self.spin_dt.setDecimals(1)
+        self.spin_dt.setSingleStep(0.5)
+        self.spin_dt.setValue(1.0)
+
         self.btn_sim   = QPushButton("Start simulation")
         self.btn_stop  = QPushButton("Stop")
         self.btn_replay= QPushButton("Replay")
@@ -834,7 +857,7 @@ class MainWindow(QMainWindow):
         self.lbl_progress = QLabel("Executed steps: 0"); form.addRow(self.lbl_progress)
         self.lbl_time = QLabel("Sim time: 0.00 s | Anim speed: 1.0×"); form.addRow(self.lbl_time)
 
-        # New checkbox to control file logging
+        # Checkbox to control file logging
         self.chk_log = QCheckBox("Save logs to file (CSV+JSON)")
 
         self.combo_speed = QComboBox()
@@ -851,6 +874,7 @@ class MainWindow(QMainWindow):
         form.addRow(self.btn_ctrl)
         form.addRow(QLabel("Final linear speed (m/s)"), self.spin_vf)
         form.addRow(QLabel("Motor time constant τ (s)"), self.spin_tau)
+        form.addRow(QLabel("Integration step dt (ms)"), self.spin_dt)
         form.addRow(self.chk_log)
         form.addRow(self.btn_sim)
         form.addRow(self.btn_stop)
@@ -884,6 +908,17 @@ class MainWindow(QMainWindow):
         # Worker
         self.worker: Optional[SimWorker] = None
         self.v_max_mm_s = None
+
+        # Current simulation dt (seconds) for UI time readouts
+        self.sim_dt_s = 0.001
+
+        # Reflect dt in window title
+        self.spin_dt.valueChanged.connect(self._refresh_title)
+
+        self._refresh_title()
+
+    def _refresh_title(self):
+        self.setWindowTitle(f"Line-Follower Simulator (dt = {self.spin_dt.value():.1f} ms)")
 
     def _draw_robot_at_initial_pose(self):
         if not (self.track and self.robot):
@@ -946,7 +981,7 @@ class MainWindow(QMainWindow):
         base_spf = int(round(1000.0 / 60.0))
         self.anim_spf = max(1, int(round(base_spf * self.anim_speed)))
         i = self.anim_idx if self.anim_steps else 0
-        self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(i*0.001, self.anim_speed))
+        self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(i*self.sim_dt_s, self.anim_speed))
 
     # ---------- Loaders ----------
     def on_load_track(self):
@@ -1142,11 +1177,17 @@ class MainWindow(QMainWindow):
         self.btn_replay.setEnabled(False)
         self.v_max_mm_s = self.spin_vf.value() * 1000.0
 
-        # Spawn worker (pass logging preference)
+        # dt selection for this run (seconds)
+        self.sim_dt_s = float(self.spin_dt.value()) / 1000.0
+
+        # Spawn worker (pass logging preference and dt)
         save_logs = self.chk_log.isChecked()
-        self.worker = SimWorker(self.track, self.robot, self.controller_fn,
-                                self.spin_vf.value(), self.spin_tau.value(),
-                                save_logs=save_logs)
+        self.worker = SimWorker(
+            self.track, self.robot, self.controller_fn,
+            self.spin_vf.value(), self.spin_tau.value(),
+            save_logs=save_logs,
+            dt_s=self.sim_dt_s
+        )
         self.worker.sig_chunk.connect(self.on_stream_chunk)
         self.worker.sig_done.connect(self.on_stream_done)
         self.worker.sig_fail.connect(self.on_stream_fail)
@@ -1199,6 +1240,10 @@ class MainWindow(QMainWindow):
         self.reset_anim_items()
         self.anim_idx = 0
         self._trail_last_pt = None
+
+        # If worker told us its dt, trust it (guarding future changes)
+        if isinstance(info, dict) and "dt_s" in info and isinstance(info["dt_s"], (int, float)):
+            self.sim_dt_s = float(info["dt_s"])
 
         if self.anim_steps:
             self.timer.start(16)
@@ -1270,7 +1315,7 @@ class MainWindow(QMainWindow):
             y = float(step.get("y_mm", 0.0))
             h = float(step.get("heading_deg", 0.0))
 
-            sim_t_s = i * 0.001
+            sim_t_s = i * self.sim_dt_s
             self.lbl_time.setText(f"Sim time: {sim_t_s:.2f} s | Anim speed: {self.anim_speed:.1f}×")
 
             v_now = float(step.get("v_mm_s", 0.0))
@@ -1333,7 +1378,7 @@ class MainWindow(QMainWindow):
 
             self.anim_idx += 1
 
-        sim_t_s = (self.anim_idx * 0.001)
+        sim_t_s = (self.anim_idx * self.sim_dt_s)
         self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(sim_t_s, self.anim_speed))
 
 # ---------- Main ----------
