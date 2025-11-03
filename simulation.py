@@ -9,7 +9,8 @@ from PySide6.QtGui import QPen, QColor, QPainterPath, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
     QFileDialog, QDoubleSpinBox, QLabel, QSplitter, QGraphicsView,
-    QGraphicsScene, QMessageBox, QComboBox, QCheckBox
+    QGraphicsScene, QMessageBox, QComboBox, QCheckBox, QDialog,
+    QDialogButtonBox, QVBoxLayout, QHBoxLayout, QSpinBox
 )
 
 # ---------- Native bindings (linesim) ----------
@@ -214,6 +215,133 @@ def start_finish_lines(track: Dict[str, Any], segs: List[object], tapeW: float):
     finish_pose = gate_at(max(0.0, sParam - START_FINISH_GAP_MM))
     return (start_pose, finish_pose) if startIsFwd else (finish_pose, start_pose)
 
+# ---------- Simulation Parmaeters ----------
+PARAMS_JSON_PATH = os.path.join(_here, "simulation_parameters.json")
+
+DEFAULT_SIM_PARAMS = {
+    "final_linear_speed_mps": 2.0,
+    "motor_time_constant_s": 0.010,
+    "integration_step_dt_ms": 1.0,
+    "sensor_mode": "analog",
+    "value_of_line": 255,
+    "value_of_table": 0,
+    "analog_variation": 50
+}
+
+def load_sim_params() -> dict:
+    try:
+        with open(PARAMS_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        out = DEFAULT_SIM_PARAMS.copy()
+        out.update({k: data.get(k, out[k]) for k in out.keys()})
+        return out
+    except Exception:
+        return DEFAULT_SIM_PARAMS.copy()
+
+def save_sim_params(params: dict) -> None:
+    p = DEFAULT_SIM_PARAMS.copy()
+    p.update(params or {})
+    p["final_linear_speed_mps"] = max(0.1, min(20.0, float(p["final_linear_speed_mps"])))
+    p["motor_time_constant_s"]  = max(0.001, min(0.100, float(p["motor_time_constant_s"])))
+    p["integration_step_dt_ms"] = max(0.5,  min(100.0, float(p["integration_step_dt_ms"])))
+    p["sensor_mode"]            = "digital" if str(p.get("sensor_mode","analog")).lower().startswith("d") else "analog"
+    p["value_of_line"]          = int(max(0, min(1023, int(p["value_of_line"]))))
+    p["value_of_table"]         = int(max(0, min(1023, int(p["value_of_table"]))))
+    p["analog_variation"]       = int(max(0, min(1023, int(p["analog_variation"]))))
+    with open(PARAMS_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(p, f, indent=2, ensure_ascii=False)
+
+
+class SimulationParamsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Simulation parameters")
+        self.setModal(True)
+
+        params = load_sim_params()
+
+        root = QVBoxLayout(self)
+
+        row1 = QHBoxLayout()
+        lbl1 = QLabel("Final linear speed (m/s)")
+        self.ed_vf = QDoubleSpinBox()
+        self.ed_vf.setRange(0.1, 20.0)
+        self.ed_vf.setSingleStep(0.1)
+        self.ed_vf.setValue(float(params["final_linear_speed_mps"]))
+        row1.addWidget(lbl1); row1.addWidget(self.ed_vf)
+        root.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        lbl2 = QLabel("Motor time constant τ (s)")
+        self.ed_tau = QDoubleSpinBox()
+        self.ed_tau.setRange(0.001, 0.100)
+        self.ed_tau.setDecimals(3)
+        self.ed_tau.setSingleStep(0.001)
+        self.ed_tau.setValue(float(params["motor_time_constant_s"]))
+        row2.addWidget(lbl2); row2.addWidget(self.ed_tau)
+        root.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        lbl3 = QLabel("Integration step dt (ms)")
+        self.ed_dt = QDoubleSpinBox()
+        self.ed_dt.setRange(0.5, 100.0)
+        self.ed_dt.setDecimals(1)
+        self.ed_dt.setSingleStep(0.5)
+        self.ed_dt.setValue(float(params["integration_step_dt_ms"]))
+        row3.addWidget(lbl3); row3.addWidget(self.ed_dt)
+        root.addLayout(row3)
+
+        row4 = QHBoxLayout()
+        lbl4 = QLabel("Sensors type")
+        self.combo_sensor = QComboBox()
+        self.combo_sensor.addItems(["analog", "digital"])
+        idx = 1 if str(params["sensor_mode"]).lower().startswith("d") else 0
+        self.combo_sensor.setCurrentIndex(idx)
+        row4.addWidget(lbl4); row4.addWidget(self.combo_sensor)
+        root.addLayout(row4)
+
+        row5 = QHBoxLayout()
+        lbl5 = QLabel("Value of line (0..1023)")
+        self.sp_line = QSpinBox()
+        self.sp_line.setRange(0, 1023)
+        self.sp_line.setValue(int(params["value_of_line"]))
+        row5.addWidget(lbl5); row5.addWidget(self.sp_line)
+        root.addLayout(row5)
+
+        row6 = QHBoxLayout()
+        lbl6 = QLabel("Value of table (0..1023)")
+        self.sp_table = QSpinBox()
+        self.sp_table.setRange(0, 1023)
+        self.sp_table.setValue(int(params["value_of_table"]))
+        row6.addWidget(lbl6); row6.addWidget(self.sp_table)
+        root.addLayout(row6)
+
+        row7 = QHBoxLayout()
+        lbl7 = QLabel("Analog variation (amplitude)")
+        self.sp_vari = QSpinBox()
+        self.sp_vari.setRange(0, 1023)
+        self.sp_vari.setValue(int(params["analog_variation"]))
+        row7.addWidget(lbl7); row7.addWidget(self.sp_vari)
+        root.addLayout(row7)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
+        btns.accepted.connect(self._on_save)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _on_save(self):
+        data = {
+            "final_linear_speed_mps": float(self.ed_vf.value()),
+            "motor_time_constant_s":  float(self.ed_tau.value()),
+            "integration_step_dt_ms": float(self.ed_dt.value()),
+            "sensor_mode":            str(self.combo_sensor.currentText()).lower(),
+            "value_of_line":          int(self.sp_line.value()),
+            "value_of_table":         int(self.sp_table.value()),
+            "analog_variation":       int(self.sp_vari.value())
+        }
+        save_sim_params(data)
+        self.accept()
+
 # ---------- Robot ----------
 @dataclass
 class Envelope:
@@ -266,12 +394,34 @@ def robot_from_json(obj: Dict[str, Any]) -> Robot:
     )
 
 # ---------- Sensor utility (8-bit two-range with noise) ----------
-def sensor_value_from_coverage_random(cov: float) -> int:
-    cov = max(0.0, min(1.0, cov))
-    if cov >= 0.5:
-        return random.randint(0, 100)   # darker = lower value
+# ---------- Sensor utility (driven by JSON) ----------
+def sensor_value_from_coverage(cov: float,
+                               sensor_mode: str,
+                               value_of_line: int,
+                               value_of_table: int,
+                               analog_variation: int) -> int:
+    cov = max(0.0, min(1.0, float(cov)))
+    is_line = (cov >= 0.5)
+
+    mode = ("digital" if str(sensor_mode).lower().startswith("d") else "analog")
+    v_line  = int(max(0, min(1023, int(value_of_line))))
+    v_table = int(max(0, min(1023, int(value_of_table))))
+    amp     = int(max(0, min(1023, int(analog_variation))))
+
+    if mode == "digital":
+        base = v_line if is_line else v_table
+        return base
+
+    # analog
+    base = v_line if is_line else v_table
+    if is_line:
+        hi = base
+        lo = max(0, base - amp)
+        return random.randint(lo, hi)
     else:
-        return random.randint(200, 255) # lighter = higher value
+        lo = base
+        hi = min(1023, base + amp)
+        return random.randint(lo, hi)
 
 # ---------- Controller loading ----------
 def load_python_controller(path: str):
@@ -504,16 +654,21 @@ class SimWorker(QThread):
     sig_fail  = Signal(str)
 
     def __init__(self, track: Dict[str, Any], robot: Robot, controller_fn,
-                 v_final_mps: float, tau_s: float, save_logs: bool,
-                 dt_s: float, parent=None):
+                params: dict, save_logs: bool, parent=None):
         super().__init__(parent)
         self.track = track
         self.robot = robot
         self.controller_fn = controller_fn
-        self.v_final = float(v_final_mps)*1000.0  # mm/s @ PWM=4095
-        self.tau = max(0.001, min(0.100, float(tau_s)))
-        self.dt_s = max(0.0005, min(0.1, float(dt_s)))  # clamp to 0.5 ms .. 100 ms for safety
         self.cancelled = False
+
+        self.v_final = float(params.get("final_linear_speed_mps", 2.0)) * 1000.0  # mm/s @ PWM=4095
+        self.tau     = max(0.001, min(0.100, float(params.get("motor_time_constant_s", 0.01))))
+        self.dt_s    = max(0.0005, min(0.1,  float(params.get("integration_step_dt_ms", 1.0))) / 1000.0)
+
+        self.sensor_mode      = params.get("sensor_mode", "analog")
+        self.value_of_line    = int(params.get("value_of_line", 255))
+        self.value_of_table   = int(params.get("value_of_table", 0))
+        self.analog_variation = int(params.get("analog_variation", 50))
 
         # Select logger (file logger or no-op)
         self.logger = SimLogger(base_dir=_here) if save_logs else NoopLogger()
@@ -690,7 +845,13 @@ class SimWorker(QThread):
                     if cov_marker > 0.0:
                         marker_hit_this_step = True
 
-                    sn_vals.append(sensor_value_from_coverage_random(cov))
+                    sn_vals.append(sensor_value_from_coverage(
+                        cov,
+                        self.sensor_mode,
+                        self.value_of_line,
+                        self.value_of_table,
+                        self.analog_variation
+                    ))
 
                 if (not self._marker_logged) and marker_hit_this_step:
                     self._marker_logged = True
@@ -835,9 +996,15 @@ class MainWindow(QMainWindow):
         # Left panel
         left = QWidget(); form = QFormLayout(left)
 
+
+        self.controller_path = None
+        self.lbl_ctrl_status = QLabel("Controller: not loaded")
+        self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
+
         self.btn_track = QPushButton("Load track (.json)")
         self.btn_robot = QPushButton("Load robot (.json)")
         self.btn_ctrl  = QPushButton("Load controller (.py)")
+        self.btn_params = QPushButton("Simulation parameters")
         self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
         self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 0.100); self.spin_tau.setDecimals(3); self.spin_tau.setSingleStep(0.001); self.spin_tau.setValue(0.010)
 
@@ -869,17 +1036,17 @@ class MainWindow(QMainWindow):
         self.anim_spf = 17
         self.combo_speed.currentIndexChanged.connect(self.on_speed_change)
 
-        form.addRow(self.btn_track)
-        form.addRow(self.btn_robot)
+        form.addRow(self.btn_params)
         form.addRow(self.btn_ctrl)
-        form.addRow(QLabel("Final linear speed (m/s)"), self.spin_vf)
-        form.addRow(QLabel("Motor time constant τ (s, 1-100ms)"), self.spin_tau)
-        form.addRow(QLabel("Integration step dt (ms)"), self.spin_dt)
+        form.addRow(QLabel("Controller status"), self.lbl_ctrl_status)
+        form.addRow(self.btn_robot)
+        form.addRow(self.btn_track)
         form.addRow(self.chk_log)
         form.addRow(self.btn_sim)
         form.addRow(self.btn_stop)
         form.addRow(self.btn_replay)
 
+        self.btn_params.clicked.connect(self.on_open_params)
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(False)
 
@@ -917,8 +1084,19 @@ class MainWindow(QMainWindow):
 
         self._refresh_title()
 
+    def on_open_params(self):
+        dlg = SimulationParamsDialog(self)
+        if dlg.exec() == QDialog.Accepted:
+            p = load_sim_params()
+            self.spin_vf.setValue(float(p["final_linear_speed_mps"]))
+            self.spin_tau.setValue(float(p["motor_time_constant_s"]))
+            self.spin_dt.setValue(float(p["integration_step_dt_ms"]))
+            self.sim_dt_s = float(p["integration_step_dt_ms"]) / 1000.0
+            self._refresh_title()
+            QMessageBox.information(self, "Simulation parameters", "Parameters saved to simulation_parameters.json")
+
     def _refresh_title(self):
-        self.setWindowTitle(f"Line-Follower Simulator (dt = {self.spin_dt.value():.1f} ms)")
+        self.setWindowTitle(f"Line-Follower Simulator (dt = {self.sim_dt_s*1000.0:.1f} ms)")
 
     def _draw_robot_at_initial_pose(self):
         if not (self.track and self.robot):
@@ -1014,9 +1192,27 @@ class MainWindow(QMainWindow):
 
     def on_load_controller(self):
         path, _ = QFileDialog.getOpenFileName(self, "Controller", "", "Python (*.py)")
-        if not path: return
-        self.controller_fn = import_controller(path)
-        QMessageBox.information(self, "Controller", "Controller loaded successfully.")
+        if not path:
+            return
+        try:
+            self.controller_fn = import_controller(path)
+            self.controller_path = path
+
+            base = os.path.basename(path)
+            self.lbl_ctrl_status.setText(f"Loaded: {base}   ✓")
+            self.lbl_ctrl_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+            self.lbl_ctrl_status.setToolTip(path)
+            self.statusBar().showMessage(f"Controller loaded: {base}", 4000)
+
+            self.btn_ctrl.setStyleSheet("background: #e8f5e9;")
+            QTimer.singleShot(600, lambda: self.btn_ctrl.setStyleSheet(""))
+
+        except Exception as e:
+            self.controller_path = None
+            self.lbl_ctrl_status.setText("Controller: load failed")
+            self.lbl_ctrl_status.setStyleSheet("color: #c62828; font-weight: 600;")
+            self.statusBar().showMessage("Controller load failed", 5000)
+            QMessageBox.critical(self, "Controller load error", str(e))
 
     # ---------- Static drawing ----------
     def clear_static(self):
@@ -1175,18 +1371,17 @@ class MainWindow(QMainWindow):
         self.btn_sim.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.btn_replay.setEnabled(False)
-        self.v_max_mm_s = self.spin_vf.value() * 1000.0
 
-        # dt selection for this run (seconds)
-        self.sim_dt_s = float(self.spin_dt.value()) / 1000.0
+        p = load_sim_params()
+        self.v_max_mm_s = float(p.get("final_linear_speed_mps", 2.0)) * 1000.0
+        self.sim_dt_s = max(0.0005, min(0.1, float(p.get("integration_step_dt_ms", 1.0)) / 1000.0))
 
         # Spawn worker (pass logging preference and dt)
         save_logs = self.chk_log.isChecked()
         self.worker = SimWorker(
             self.track, self.robot, self.controller_fn,
-            self.spin_vf.value(), self.spin_tau.value(),
-            save_logs=save_logs,
-            dt_s=self.sim_dt_s
+            params=p,
+            save_logs=save_logs
         )
         self.worker.sig_chunk.connect(self.on_stream_chunk)
         self.worker.sig_done.connect(self.on_stream_done)
