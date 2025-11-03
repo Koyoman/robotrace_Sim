@@ -28,7 +28,6 @@ It includes graphical tools for **track design** and **robot modeling**, plus a 
 - Sensor modeling using geometric intersection with the tape (`utills_c/linesim.dll`).
 - External controller support:
   - **Python** (`.py`, e.g., `Example/Controller/PID_default.py`)
-  - **C** (compiled `.dll`, `.so`, `.dylib` — via CTypes bindings)
 - Automatic **logging** in `Logs/sim_log_YYYYMMDD_HHMMSS.csv/json`.
 - Detects:
   - **Track exit**
