@@ -221,10 +221,10 @@ PARAMS_JSON_PATH = os.path.join(_here, "simulation_parameters.json")
 DEFAULT_SIM_PARAMS = {
     "final_linear_speed_mps": 2.0,
     "motor_time_constant_s": 0.010,
-    "integration_step_dt_ms": 1.0,
+    "simulation_step_dt_ms": 1.0,
     "sensor_mode": "analog",
     "value_of_line": 255,
-    "value_of_table": 0,
+    "value_of_background": 0,
     "analog_variation": 50
 }
 
@@ -243,10 +243,10 @@ def save_sim_params(params: dict) -> None:
     p.update(params or {})
     p["final_linear_speed_mps"] = max(0.1, min(20.0, float(p["final_linear_speed_mps"])))
     p["motor_time_constant_s"]  = max(0.001, min(0.100, float(p["motor_time_constant_s"])))
-    p["integration_step_dt_ms"] = max(0.5,  min(100.0, float(p["integration_step_dt_ms"])))
+    p["simulation_step_dt_ms"] = max(0.5,  min(100.0, float(p["simulation_step_dt_ms"])))
     p["sensor_mode"]            = "digital" if str(p.get("sensor_mode","analog")).lower().startswith("d") else "analog"
     p["value_of_line"]          = int(max(0, min(1023, int(p["value_of_line"]))))
-    p["value_of_table"]         = int(max(0, min(1023, int(p["value_of_table"]))))
+    p["value_of_background"]         = int(max(0, min(1023, int(p["value_of_background"]))))
     p["analog_variation"]       = int(max(0, min(1023, int(p["analog_variation"]))))
     with open(PARAMS_JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(p, f, indent=2, ensure_ascii=False)
@@ -287,7 +287,7 @@ class SimulationParamsDialog(QDialog):
         self.ed_dt.setRange(0.5, 100.0)
         self.ed_dt.setDecimals(1)
         self.ed_dt.setSingleStep(0.5)
-        self.ed_dt.setValue(float(params["integration_step_dt_ms"]))
+        self.ed_dt.setValue(float(params["simulation_step_dt_ms"]))
         row3.addWidget(lbl3); row3.addWidget(self.ed_dt)
         root.addLayout(row3)
 
@@ -312,7 +312,7 @@ class SimulationParamsDialog(QDialog):
         lbl6 = QLabel("Value of table (0..1023)")
         self.sp_table = QSpinBox()
         self.sp_table.setRange(0, 1023)
-        self.sp_table.setValue(int(params["value_of_table"]))
+        self.sp_table.setValue(int(params["value_of_background"]))
         row6.addWidget(lbl6); row6.addWidget(self.sp_table)
         root.addLayout(row6)
 
@@ -333,10 +333,10 @@ class SimulationParamsDialog(QDialog):
         data = {
             "final_linear_speed_mps": float(self.ed_vf.value()),
             "motor_time_constant_s":  float(self.ed_tau.value()),
-            "integration_step_dt_ms": float(self.ed_dt.value()),
+            "simulation_step_dt_ms": float(self.ed_dt.value()),
             "sensor_mode":            str(self.combo_sensor.currentText()).lower(),
             "value_of_line":          int(self.sp_line.value()),
-            "value_of_table":         int(self.sp_table.value()),
+            "value_of_background":         int(self.sp_table.value()),
             "analog_variation":       int(self.sp_vari.value())
         }
         save_sim_params(data)
@@ -398,14 +398,14 @@ def robot_from_json(obj: Dict[str, Any]) -> Robot:
 def sensor_value_from_coverage(cov: float,
                                sensor_mode: str,
                                value_of_line: int,
-                               value_of_table: int,
+                               value_of_background: int,
                                analog_variation: int) -> int:
     cov = max(0.0, min(1.0, float(cov)))
     is_line = (cov >= 0.5)
 
     mode = ("digital" if str(sensor_mode).lower().startswith("d") else "analog")
     v_line  = int(max(0, min(1023, int(value_of_line))))
-    v_table = int(max(0, min(1023, int(value_of_table))))
+    v_table = int(max(0, min(1023, int(value_of_background))))
     amp     = int(max(0, min(1023, int(analog_variation))))
 
     if mode == "digital":
@@ -663,11 +663,11 @@ class SimWorker(QThread):
 
         self.v_final = float(params.get("final_linear_speed_mps", 2.0)) * 1000.0  # mm/s @ PWM=4095
         self.tau     = max(0.001, min(0.100, float(params.get("motor_time_constant_s", 0.01))))
-        self.dt_s    = max(0.0005, min(0.1,  float(params.get("integration_step_dt_ms", 1.0))) / 1000.0)
+        self.dt_s    = max(0.0005, min(0.1,  float(params.get("simulation_step_dt_ms", 1.0))) / 1000.0)
 
         self.sensor_mode      = params.get("sensor_mode", "analog")
         self.value_of_line    = int(params.get("value_of_line", 255))
-        self.value_of_table   = int(params.get("value_of_table", 0))
+        self.value_of_background   = int(params.get("value_of_background", 0))
         self.analog_variation = int(params.get("analog_variation", 50))
 
         # Select logger (file logger or no-op)
@@ -849,7 +849,7 @@ class SimWorker(QThread):
                         cov,
                         self.sensor_mode,
                         self.value_of_line,
-                        self.value_of_table,
+                        self.value_of_background,
                         self.analog_variation
                     ))
 
@@ -1090,8 +1090,8 @@ class MainWindow(QMainWindow):
             p = load_sim_params()
             self.spin_vf.setValue(float(p["final_linear_speed_mps"]))
             self.spin_tau.setValue(float(p["motor_time_constant_s"]))
-            self.spin_dt.setValue(float(p["integration_step_dt_ms"]))
-            self.sim_dt_s = float(p["integration_step_dt_ms"]) / 1000.0
+            self.spin_dt.setValue(float(p["simulation_step_dt_ms"]))
+            self.sim_dt_s = float(p["simulation_step_dt_ms"]) / 1000.0
             self._refresh_title()
             QMessageBox.information(self, "Simulation parameters", "Parameters saved to simulation_parameters.json")
 
@@ -1374,7 +1374,7 @@ class MainWindow(QMainWindow):
 
         p = load_sim_params()
         self.v_max_mm_s = float(p.get("final_linear_speed_mps", 2.0)) * 1000.0
-        self.sim_dt_s = max(0.0005, min(0.1, float(p.get("integration_step_dt_ms", 1.0)) / 1000.0))
+        self.sim_dt_s = max(0.0005, min(0.1, float(p.get("simulation_step_dt_ms", 1.0)) / 1000.0))
 
         # Spawn worker (pass logging preference and dt)
         save_logs = self.chk_log.isChecked()
