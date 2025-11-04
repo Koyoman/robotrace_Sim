@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QPointF, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QPointF, QThread, Signal, QTimer, QElapsedTimer
 from PySide6.QtGui import QPen, QColor, QPainterPath, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
@@ -970,7 +970,7 @@ class SimView(QGraphicsView):
     def __init__(self, scene: SimScene):
         super().__init__(scene)
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
-        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
 
     def wheelEvent(self, e):
@@ -996,6 +996,20 @@ class MainWindow(QMainWindow):
         # Left panel
         left = QWidget(); form = QFormLayout(left)
 
+        # Unified animation interval (ms) for streaming + replay
+        self.anim_interval_ms = 42  # ~24 FPS
+        # Flag to differentiate streaming vs replay
+        self.streaming = False
+
+        self.anim_speed = 1.0
+        self.anim_spf = 17
+        self.anim_idx = 0
+        self.anim_steps: List[Dict[str, Any]] = []
+        self.anim_items: Dict[str, Any] = {}
+
+        # Worker
+        self.worker: Optional[SimWorker] = None
+        self.v_max_mm_s = None
 
         self.controller_path = None
         self.lbl_ctrl_status = QLabel("Controller: not loaded")
@@ -1014,6 +1028,7 @@ class MainWindow(QMainWindow):
         self.spin_dt.setDecimals(1)
         self.spin_dt.setSingleStep(0.5)
         self.spin_dt.setValue(1.0)
+        self.sim_dt_s = float(self.spin_dt.value()) / 1000.0
 
         self.btn_sim   = QPushButton("Start simulation")
         self.btn_stop  = QPushButton("Stop")
@@ -1031,10 +1046,8 @@ class MainWindow(QMainWindow):
         self.combo_speed.addItems(["0.1×", "0.5×", "1×", "2×", "4×"])
         self.combo_speed.setCurrentIndex(2)
         form.addRow(QLabel("Animation speed"), self.combo_speed)
-
-        self.anim_speed = 1.0
-        self.anim_spf = 17
         self.combo_speed.currentIndexChanged.connect(self.on_speed_change)
+        self.on_speed_change(self.combo_speed.currentIndex())
 
         form.addRow(self.btn_params)
         form.addRow(self.btn_ctrl)
@@ -1066,18 +1079,13 @@ class MainWindow(QMainWindow):
         self.btn_replay.clicked.connect(self.on_replay)
 
         # Replay/animation
-        self.timer = QTimer(self)
+        self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
+        self._replay_elapsed = QElapsedTimer()
+        self._replay_elapsed.start()
+        self._sim_time_acc_s = 0.0
         self.anim_idx = 0
-        self.anim_steps: List[Dict[str, Any]] = []
-        self.anim_items: Dict[str, Any] = {}
-
-        # Worker
-        self.worker: Optional[SimWorker] = None
-        self.v_max_mm_s = None
-
-        # Current simulation dt (seconds) for UI time readouts
-        self.sim_dt_s = 0.001
+        self.timer.start(self.anim_interval_ms)
 
         # Reflect dt in window title
         self.spin_dt.valueChanged.connect(self._refresh_title)
@@ -1094,6 +1102,10 @@ class MainWindow(QMainWindow):
             self.sim_dt_s = float(p["simulation_step_dt_ms"]) / 1000.0
             self._refresh_title()
             QMessageBox.information(self, "Simulation parameters", "Parameters saved to simulation_parameters.json")
+            try:
+                self.on_speed_change(self.combo_speed.currentIndex())
+            except Exception:
+                pass
 
     def _refresh_title(self):
         self.setWindowTitle(f"Line-Follower Simulator (dt = {self.sim_dt_s*1000.0:.1f} ms)")
@@ -1156,12 +1168,15 @@ class MainWindow(QMainWindow):
     def on_speed_change(self, idx: int):
         mapping = {0: 0.1, 1: 0.5, 2: 1.0, 3: 2.0, 4: 4.0}
         self.anim_speed = mapping.get(idx, 1.0)
-        base_spf = int(round(1000.0 / 60.0))
-        self.anim_spf = max(1, int(round(base_spf * self.anim_speed)))
+        steps_per_sec = 1.0 / max(1e-6, self.sim_dt_s)
+        fps = 1000.0 / max(1.0, float(self.anim_interval_ms))
+        self.anim_spf = max(1, int(round((steps_per_sec * self.anim_speed) / fps)))
         i = self.anim_idx if self.anim_steps else 0
-        self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(i*self.sim_dt_s, self.anim_speed))
+        self.lbl_time.setText(
+            "Sim time: {:.2f} s | Anim speed: {:.1f}×".format(i*self.sim_dt_s, self.anim_speed)
+        )
 
-    # ---------- Loaders ----------
+# ---------- Loaders ----------
     def on_load_track(self):
         path, _ = QFileDialog.getOpenFileName(self, "Track file", "", "JSON (*.json)")
         if not path: return
@@ -1352,6 +1367,7 @@ class MainWindow(QMainWindow):
     # ---------- Simulation ----------
     def on_simulate(self):
         if not (self.track and self.robot):
+            self.streaming = True
             QMessageBox.warning(self, "Missing data", "Load a track and a robot.")
             return
 
@@ -1375,6 +1391,11 @@ class MainWindow(QMainWindow):
         p = load_sim_params()
         self.v_max_mm_s = float(p.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.sim_dt_s = max(0.0005, min(0.1, float(p.get("simulation_step_dt_ms", 1.0)) / 1000.0))
+
+        try:
+            self.on_speed_change(self.combo_speed.currentIndex())
+        except Exception:
+            pass
 
         # Spawn worker (pass logging preference and dt)
         save_logs = self.chk_log.isChecked()
@@ -1402,6 +1423,7 @@ class MainWindow(QMainWindow):
 
     def on_stop(self):
         """Stop replay timer and cancel worker thread."""
+        self.streaming = False
         if self.timer.isActive():
             self.timer.stop()
         if self.worker and self.worker.isRunning():
@@ -1419,9 +1441,15 @@ class MainWindow(QMainWindow):
         self.step_count += len(chunk)
         self.lbl_progress.setText(f"Executed steps: {self.step_count}")
         if not self.timer.isActive():
-            self.timer.start(16)
+            self._sim_time_acc_s = 0.0 if self.anim_idx == 0 else self.anim_idx * self.sim_dt_s
+            if self._replay_elapsed is None:
+                self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
+            else:
+                self._replay_elapsed.restart()
+            self.timer.start(self.anim_interval_ms)
 
     def on_stream_done(self, info: dict):
+        self.streaming = False
         if self.worker and self.worker.isRunning():
             self.worker.wait(2000)
         self.worker = None
@@ -1440,8 +1468,15 @@ class MainWindow(QMainWindow):
         if isinstance(info, dict) and "dt_s" in info and isinstance(info["dt_s"], (int, float)):
             self.sim_dt_s = float(info["dt_s"])
 
+        self._sim_time_acc_s = 0.0
+        if self._replay_elapsed is None:
+            self._replay_elapsed = QElapsedTimer()
+            self._replay_elapsed.start()
+        else:
+            self._replay_elapsed.restart()
+
         if self.anim_steps:
-            self.timer.start(16)
+            self.timer.start(self.anim_interval_ms)
 
     def on_stream_fail(self, msg: str):
         self.worker = None
@@ -1473,13 +1508,21 @@ class MainWindow(QMainWindow):
                 self.anim_items["wheels"].append(item)
 
     def on_replay(self):
-        if not self.anim_steps: return
+        if not self.anim_steps:
+            return
         self.reset_anim_items()
         self.anim_idx = 0
-        self.timer.start(16)
+        self._sim_time_acc_s = 0.0
+        if self._replay_elapsed is None:
+            self._replay_elapsed = QElapsedTimer()
+            self._replay_elapsed.start()
+        else:
+            self._replay_elapsed.restart()
+        self.timer.start(self.anim_interval_ms)
 
     def closeEvent(self, event):
         try:
+            self.streaming = False
             if self.timer.isActive():
                 self.timer.stop()
             if self.worker and self.worker.isRunning():
@@ -1497,20 +1540,24 @@ class MainWindow(QMainWindow):
         if ("trail_items" not in self.anim_items) or ("robot" not in self.anim_items):
             self.reset_anim_items()
 
-        steps_this_frame = getattr(self, "anim_spf", 17)
+        if self._replay_elapsed is None:
+            self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
+        elapsed_s = self._replay_elapsed.restart() / 1000.0
 
-        for _ in range(max(1, steps_this_frame)):
-            i = self.anim_idx
-            if i >= len(self.anim_steps):
-                self.timer.stop()
-                return
+        self._sim_time_acc_s += elapsed_s * self.anim_speed
 
-            step = self.anim_steps[i]
+        target_idx = int(round(self._sim_time_acc_s / self.sim_dt_s))
+        steps_to_advance = max(0, min(target_idx - self.anim_idx, 500))
+
+        for _ in range(steps_to_advance):
+            if self.anim_idx >= len(self.anim_steps):
+                self.timer.stop(); return
+            step = self.anim_steps[self.anim_idx]
             x = float(step.get("x_mm", 0.0))
             y = float(step.get("y_mm", 0.0))
             h = float(step.get("heading_deg", 0.0))
 
-            sim_t_s = i * self.sim_dt_s
+            sim_t_s = self.anim_idx * self.sim_dt_s
             self.lbl_time.setText(f"Sim time: {sim_t_s:.2f} s | Anim speed: {self.anim_speed:.1f}×")
 
             v_now = float(step.get("v_mm_s", 0.0))
