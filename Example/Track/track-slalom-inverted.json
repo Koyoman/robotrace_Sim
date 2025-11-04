@@ -1,0 +1,128 @@
+{
+  "area": {
+    "widthMM": 3000.0,
+    "heightMM": 2000.0
+  },
+  "origin": {
+    "p": {
+      "x": 500.0,
+      "y": 500.0
+    },
+    "headingDeg": 0.0
+  },
+  "tapeWidthMM": 20.0,
+  "segments": [
+    {
+      "kind": "straight",
+      "id": "R1",
+      "lengthMM": 1500.0
+    },
+    {
+      "kind": "arc",
+      "id": "C1",
+      "radiusMM": 300.0,
+      "sweepDeg": 90.0
+    },
+    {
+      "kind": "arc",
+      "id": "C2",
+      "radiusMM": 150.0,
+      "sweepDeg": 80.0
+    },
+    {
+      "kind": "arc",
+      "id": "C3",
+      "radiusMM": 150.0,
+      "sweepDeg": -80.0
+    },
+    {
+      "kind": "arc",
+      "id": "C4",
+      "radiusMM": 150.0,
+      "sweepDeg": 80.0
+    },
+    {
+      "kind": "arc",
+      "id": "C5",
+      "radiusMM": 150.0,
+      "sweepDeg": -80.0
+    },
+    {
+      "kind": "arc",
+      "id": "C6",
+      "radiusMM": 150.0,
+      "sweepDeg": 80.0
+    },
+    {
+      "kind": "arc",
+      "id": "C7",
+      "radiusMM": 150.0,
+      "sweepDeg": -80.0
+    },
+    {
+      "kind": "straight",
+      "id": "R2",
+      "lengthMM": 300.0
+    },
+    {
+      "kind": "arc",
+      "id": "C8",
+      "radiusMM": 300.0,
+      "sweepDeg": 110.0
+    },
+    {
+      "kind": "arc",
+      "id": "C9",
+      "radiusMM": 300.0,
+      "sweepDeg": 60.0
+    },
+    {
+      "kind": "arc",
+      "id": "C10",
+      "radiusMM": 300.0,
+      "sweepDeg": -60.0
+    },
+    {
+      "kind": "arc",
+      "id": "C11",
+      "radiusMM": 300.0,
+      "sweepDeg": 60.0
+    },
+    {
+      "kind": "arc",
+      "id": "C12",
+      "radiusMM": 300.0,
+      "sweepDeg": -60.0
+    },
+    {
+      "kind": "arc",
+      "id": "C13",
+      "radiusMM": 300.0,
+      "sweepDeg": 60.0
+    },
+    {
+      "kind": "arc",
+      "id": "C14",
+      "radiusMM": 300.0,
+      "sweepDeg": -60.0
+    },
+    {
+      "kind": "arc",
+      "id": "C15",
+      "radiusMM": 201.0,
+      "sweepDeg": 160.0
+    },
+    {
+      "kind": "straight",
+      "id": "R3",
+      "lengthMM": 500.0
+    }
+  ],
+  "startFinish": {
+    "enabled": true,
+    "onSegmentId": "R1",
+    "sParamMM": 0.0,
+    "invert": true,
+    "startIsForward": false
+  }
+}
