@@ -1,0 +1,173 @@
+{
+  "area": {
+    "widthMM": 3000.0,
+    "heightMM": 2000.0
+  },
+  "origin": {
+    "p": {
+      "x": 500.0,
+      "y": 1800.0
+    },
+    "headingDeg": 0.0
+  },
+  "tapeWidthMM": 20.0,
+  "segments": [
+    {
+      "kind": "straight",
+      "id": "R1",
+      "lengthMM": 2004.25
+    },
+    {
+      "kind": "arc",
+      "id": "C1",
+      "radiusMM": 156.11,
+      "sweepDeg": -94.6
+    },
+    {
+      "kind": "straight",
+      "id": "R2",
+      "lengthMM": 150.0
+    },
+    {
+      "kind": "arc",
+      "id": "C2",
+      "radiusMM": 425.68,
+      "sweepDeg": -63.8
+    },
+    {
+      "kind": "straight",
+      "id": "R3",
+      "lengthMM": 900.0
+    },
+    {
+      "kind": "arc",
+      "id": "C3",
+      "radiusMM": 330.02,
+      "sweepDeg": 134.5
+    },
+    {
+      "kind": "straight",
+      "id": "R4",
+      "lengthMM": 339.25
+    },
+    {
+      "kind": "arc",
+      "id": "C4",
+      "radiusMM": 127.0,
+      "sweepDeg": 152.0
+    },
+    {
+      "kind": "arc",
+      "id": "C5",
+      "radiusMM": 156.69,
+      "sweepDeg": -174.2
+    },
+    {
+      "kind": "straight",
+      "id": "R5",
+      "lengthMM": 150.0
+    },
+    {
+      "kind": "arc",
+      "id": "C6",
+      "radiusMM": 390.21,
+      "sweepDeg": 29.0
+    },
+    {
+      "kind": "straight",
+      "id": "R6",
+      "lengthMM": 150.0
+    },
+    {
+      "kind": "arc",
+      "id": "C7",
+      "radiusMM": 100.0,
+      "sweepDeg": 155.4
+    },
+    {
+      "kind": "straight",
+      "id": "R7",
+      "lengthMM": 150.0
+    },
+    {
+      "kind": "arc",
+      "id": "C8",
+      "radiusMM": 343.01,
+      "sweepDeg": -106.8
+    },
+    {
+      "kind": "straight",
+      "id": "R8",
+      "lengthMM": 563.29
+    },
+    {
+      "kind": "arc",
+      "id": "C9",
+      "radiusMM": 140.18,
+      "sweepDeg": -106.0
+    },
+    {
+      "kind": "straight",
+      "id": "R9",
+      "lengthMM": 244.4
+    },
+    {
+      "kind": "arc",
+      "id": "C10",
+      "radiusMM": 647.94,
+      "sweepDeg": -39.5
+    },
+    {
+      "kind": "straight",
+      "id": "R10",
+      "lengthMM": 287.11
+    },
+    {
+      "kind": "arc",
+      "id": "C11",
+      "radiusMM": 574.65,
+      "sweepDeg": -54.6
+    },
+    {
+      "kind": "straight",
+      "id": "R11",
+      "lengthMM": 874.15
+    },
+    {
+      "kind": "arc",
+      "id": "C12",
+      "radiusMM": 774.45,
+      "sweepDeg": -33.8
+    },
+    {
+      "kind": "straight",
+      "id": "R12",
+      "lengthMM": 1831.48
+    },
+    {
+      "kind": "arc",
+      "id": "C13",
+      "radiusMM": 176.0,
+      "sweepDeg": -141.1
+    },
+    {
+      "kind": "arc",
+      "id": "C14",
+      "radiusMM": 152.4,
+      "sweepDeg": 94.7
+    },
+    {
+      "kind": "arc",
+      "id": "C15",
+      "radiusMM": 546.0,
+      "sweepDeg": -111.7
+    }
+  ],
+  "startFinish": {
+    "enabled": true,
+    "onSegmentId": "R12",
+    "sParamMM": 1400.0,
+    "invert": true,
+    "startIsForward": false
+  }
+}

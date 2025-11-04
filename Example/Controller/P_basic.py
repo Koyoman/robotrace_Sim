@@ -1,7 +1,7 @@
 # controller_p_weighted.py — Proportional controller with hysteresis (marker-safe)
 
 BASE_PWM = 2048
-KP = 400.0
+KP = 0.20
 PWM_MIN, PWM_MAX = -4095, 4095
 
 # Hysteresis thresholds (dark tape = lower reading)
