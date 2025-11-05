@@ -210,7 +210,11 @@ __marimo__/
 /Logs/*.json
 /Logs/*.csv
 /*.json
+/*.py
 !simulation_parameters.json
+!robot_editor.py
+!track_editor.py
+!simulator.py
 *.obj
 *.exp
 *.lib
