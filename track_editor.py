@@ -1,3 +1,9 @@
+"""Track Editor (PySide6)
+
+A small graphical tool to build race tracks from straight and arc segments.
+It provides a live preview scene, simple controls to add/edit segments, and
+JSON import/export. Comments and docstrings are kept simple for beginners.
+"""
 from __future__ import annotations
 import sys, json, math
 from typing import Any
@@ -22,7 +28,10 @@ from Utils.track_model import TrackModel, StartFinishCfg
 
 # ---------- Scene ----------
 class TrackScene(QGraphicsScene):
+    """QGraphicsScene that renders the track (grid, tape path, markers, and gates).
+        Holds a reference to the TrackModel and highlights the selected segment."""
     def __init__(self, model: TrackModel):
+        """Set up scene style and store the shared TrackModel instance."""
         super().__init__()
         self.model = model
         self.highlight_index: int | None = None
@@ -32,6 +41,7 @@ class TrackScene(QGraphicsScene):
         self._label_font.setBold(True)
 
     def drawBackground(self, painter: QPainter, rect):
+        """Draw a gray grid based on the grid step to help alignment."""
         super().drawBackground(painter, rect)
         step = max(5.0, self.model.gridStepMM)
         pen = QPen(QColor(25, 25, 25), 1)
@@ -45,11 +55,13 @@ class TrackScene(QGraphicsScene):
             painter.drawLine(QPointF(left, y), QPointF(right, y)); y += step
 
     def _add_label(self, text: str, x: float, y: float, color: QColor):
+        """Draw a small text label at (x, y) using the configured label font and color."""
         t = self.addText(text, self._label_font)
         t.setDefaultTextColor(color)
         t.setPos(x, y)
 
     def rebuild(self):
+        """Recreate all scene items from the model: build segments, draw the full tape path, place curvature markers and optional Start/Finish gates, update scene rect, and apply highlight to the active segment."""
         self.clear()
 
         cur = self.model.origin
@@ -125,6 +137,7 @@ class TrackScene(QGraphicsScene):
 
 
 class TrackView(QGraphicsView):
+    """QGraphicsView wrapper with smooth zoom/pan behavior for inspecting the scene."""
     def __init__(self, scene: TrackScene):
         super().__init__(scene)
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -134,11 +147,14 @@ class TrackView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
 
     def wheelEvent(self, event):
+        """Zoom in/out around the mouse cursor using the wheel delta and accept the event."""
         s = 1.15 if event.angleDelta().y() > 0 else 1/1.15
         self.scale(s, s)
         event.accept()
 
 class MainWindow(QMainWindow):
+    """Main window that wires controls (spin boxes, buttons, lists) to the TrackModel
+        and triggers scene rebuilds and JSON import/export."""
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Track Editor (Python/PySide6)")
@@ -329,6 +345,7 @@ class MainWindow(QMainWindow):
             return f"Arc  {s.id} — R={s.radiusMM:.1f} mm, θ={s.sweepDeg:.1f}°"
 
     def fit_view(self):
+        """Fit the entire scene rect into the view while preserving aspect ratio."""
         rect = self.scene.sceneRect()
         self.view.fitInView(rect, Qt.KeepAspectRatio)
 
@@ -354,6 +371,7 @@ class MainWindow(QMainWindow):
         return candidate
 
     def refresh_list(self, preserve_index=True):
+        """Refresh the segments QListWidget, preserving the current selection when possible."""
         cur = self.list_segments.currentRow()
         self.list_segments.blockSignals(True)
         self.list_segments.clear()
@@ -366,6 +384,7 @@ class MainWindow(QMainWindow):
             self.list_segments.setCurrentRow(self.list_segments.count() - 1)
 
     def refresh_sf_combo(self):
+        """Populate the Start/Finish segment combo with straights and sync current values."""
         self.combo_sf_seg.blockSignals(True)
         self.combo_sf_seg.clear()
         for s in self.model.segments:
@@ -381,6 +400,7 @@ class MainWindow(QMainWindow):
         self.chk_sf_forward.setChecked(self.model.startFinish.startIsForward)
 
     def on_select_segment(self, row: int):
+        """Update parameter controls according to the selected segment and rebuild the scene."""
         self.scene.highlight_index = row
         if 0 <= row < len(self.model.segments):
             s = self.model.segments[row]
@@ -395,6 +415,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def apply_seg_edit(self):
+        """Apply edits from spin boxes to the selected segment and refresh drawing/combos."""
         row = self.list_segments.currentRow()
         if 0 <= row < len(self.model.segments):
             s = self.model.segments[row]
@@ -407,6 +428,7 @@ class MainWindow(QMainWindow):
             self.scene.rebuild(); self.refresh_sf_combo()
 
     def add_straight(self):
+        """Append a straight segment starting at the origin and select it."""
         seg = SegStraight(kind="straight", id=self.ensure_unique_id(self.next_id_for('straight')),
                           from_pose=self.model.origin, lengthMM=500.0)
         self.model.segments.append(seg)
@@ -414,6 +436,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild(); self.refresh_sf_combo()
 
     def add_arc(self):
+        """Append a circular arc segment starting at the origin and select it."""
         seg = SegArc(kind="arc", id=self.ensure_unique_id(self.next_id_for('arc')),
                      from_pose=self.model.origin, radiusMM=300.0, sweepDeg=90.0)
         self.model.segments.append(seg)
@@ -421,6 +444,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild(); self.refresh_sf_combo()
 
     def del_segment(self):
+        """Remove the selected segment (updating Start/Finish if it referenced it) and refresh UI."""
         row = self.list_segments.currentRow()
         if row < 0 and self.list_segments.count() > 0:
             row = self.list_segments.count() - 1
@@ -435,6 +459,7 @@ class MainWindow(QMainWindow):
             self.scene.rebuild(); self.refresh_sf_combo()
 
     def rename_segment(self):
+        """Prompt the user for a new ID, normalize it, keep type letter (R/C), and ensure uniqueness."""
         row = self.list_segments.currentRow()
         if 0 <= row < len(self.model.segments):
             s = self.model.segments[row]
@@ -454,19 +479,23 @@ class MainWindow(QMainWindow):
                 self.scene.rebuild()
 
     def on_area_change(self):
+        """Update the drawing area (width/height) and rebuild the scene."""
         self.model.area_widthMM = self.spin_area_w.value()
         self.model.area_heightMM = self.spin_area_h.value()
         self.scene.rebuild()
 
     def on_grid_change(self):
+        """Update grid step (mm) and rebuild the scene to redraw the background grid."""
         self.model.gridStepMM = self.spin_grid.value()
         self.scene.rebuild()
 
     def on_origin_change(self):
+        """Update the origin pose (x, y, heading) and rebuild the scene."""
         self.model.origin = Pose(Pt(self.spin_ox.value(), self.spin_oy.value()), self.spin_oh.value())
         self.scene.rebuild()
 
     def on_sf_change(self):
+        """Apply Start/Finish switches/values and rebuild the scene."""
         sf = self.model.startFinish
         sf.enabled = self.chk_sf.isChecked()
         if self.combo_sf_seg.currentIndex() >= 0:
@@ -476,15 +505,18 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_sf_slider(self, v: int):
+        """Mirror slider value into the s-position control and apply Start/Finish changes."""
         self.spin_sf_s.setValue(float(v))
         self.on_sf_change()
 
     def new_file(self):
+        """Reset the model to a blank track and refresh all widgets and the scene."""
         self.model = TrackModel()
         self.scene.model = self.model
         self.refresh_list(); self.refresh_sf_combo(); self.scene.rebuild()
 
     def import_json(self):
+        """Open a JSON file, deserialize a TrackModel, and refresh UI/scene (with error dialog on failure)."""
         path, _ = QFileDialog.getOpenFileName(self, "Import track", "", "JSON (*.json)")
         if not path: return
         try:
@@ -497,6 +529,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Import failed:\n{e}")
 
     def export_json(self):
+        """Serialize the current TrackModel to a JSON file (with error dialog on failure)."""
         path, _ = QFileDialog.getSaveFileName(self, "Export track", "track.json", "JSON (*.json)")
         if not path: return
         try:
