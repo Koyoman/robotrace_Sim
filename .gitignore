@@ -218,3 +218,4 @@ __marimo__/
 *.obj
 *.exp
 *.lib
+/*.rmap

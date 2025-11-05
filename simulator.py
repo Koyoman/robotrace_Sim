@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, sys, math, json, csv, ctypes, importlib.util, random, time
+import os, sys, math, json, csv, ctypes, importlib.util, random, time, zlib
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 from datetime import datetime
@@ -56,6 +56,31 @@ _linesim.crossed_finish_C.argtypes = [
     c_double, c_double, c_double, c_double
 ]
 _linesim.crossed_finish_C.restype = c_int
+
+_linesim.step_dynamics_C = getattr(_linesim, "step_dynamics_C")
+_linesim.step_dynamics_C.argtypes = [
+    c_double, c_double, c_double,
+    c_double, c_double,
+    c_int, c_int,
+    c_double, c_double, c_double, c_double,
+    POINTER(c_double), POINTER(c_double), POINTER(c_double),
+    POINTER(c_double), POINTER(c_double),
+    POINTER(c_double), POINTER(c_double)
+]
+_linesim.step_dynamics_C.restype = None
+
+try:
+    _linesim.envelope_contacts_raster_C.argtypes = [
+        c_double, c_double, c_double,
+        c_double, c_double,
+        ctypes.POINTER(ctypes.c_ubyte), c_int, c_int,
+        c_double, c_double, c_double
+    ]
+    _linesim.envelope_contacts_raster_C.restype = c_int
+except Exception:
+    pass
+
+
 
 WHEEL_W_MM = 22.0
 WHEEL_H_MM = 15.0
@@ -150,6 +175,112 @@ MARKER_OFFSET_MM = 40.0
 MARKER_LENGTH_MM = 40.0
 MARKER_THICKNESS_MM = 20.0
 
+def _raster_paths_for_track(track_path: str) -> str:
+    base, _ = os.path.splitext(track_path)
+    return base + ".rmap"
+
+def _rmap_save(path: str, meta: dict, mask_bytes: bytes) -> None:
+    blob = zlib.compress(mask_bytes, level=6)
+    with open(path, "wb") as f:
+        header = json.dumps(meta, separators=(",", ":")).encode("utf-8") + b"\n"
+        f.write(header)
+        f.write(blob)
+
+def _rmap_load(path: str) -> tuple[dict, bytes] | None:
+    try:
+        with open(path, "rb") as f:
+            header = f.readline()
+            meta = json.loads(header.decode("utf-8"))
+            blob = f.read()
+            data = zlib.decompress(blob)
+            return meta, data
+    except Exception:
+        return None
+
+def ensure_track_raster(track_path: str, track_json: dict, segs: list, tapeW: float, gates) -> dict:
+    rpath = _raster_paths_for_track(track_path)
+    cached = _rmap_load(rpath)
+    if cached is not None:
+        meta, data = cached
+        return {"path": rpath, "meta": meta, "data": data}
+
+    pts = segments_polyline(segs, step=1.0)
+    markers = SimWorker.build_markers(self=None, segs=segs, tapeW=tapeW, gates=gates) if hasattr(SimWorker, "build_markers") else []
+
+    xs = [p.x for p in pts] + [m[0] for m in markers]
+    ys = [p.y for p in pts] + [m[1] for m in markers]
+    if not xs or not ys:
+        raise RuntimeError("Invalid track geometry for rasterization.")
+    minx = math.floor(min(xs) - 80.0)
+    miny = math.floor(min(ys) - 80.0)
+    maxx = math.ceil(max(xs) + 80.0)
+    maxy = math.ceil(max(ys) + 80.0)
+
+    W = int(maxx - minx)
+    H = int(maxy - miny)
+    origin_x = float(minx)
+    origin_y = float(miny)
+    pixel_mm = 1.0
+
+    buf = bytearray(W * H)
+
+    def set_px(wx: float, wy: float):
+        ix = int((wx - origin_x) // pixel_mm)
+        iy = int((wy - origin_y) // pixel_mm)
+        if 0 <= ix < W and 0 <= iy < H:
+            buf[iy*W + ix] = 255
+
+    half = tapeW * 0.5
+    if len(pts) >= 2:
+        for i in range(len(pts) - 1):
+            x1, y1 = pts[i].x, pts[i].y
+            x2, y2 = pts[i+1].x, pts[i+1].y
+            mnx = math.floor(min(x1, x2) - half); mxx = math.ceil(max(x1, x2) + half)
+            mny = math.floor(min(y1, y2) - half); mxy = math.ceil(max(y1, y2) + half)
+            ix0 = max(0, int(mnx - origin_x)); iy0 = max(0, int(mny - origin_y))
+            ix1 = min(W-1, int(mxx - origin_x)); iy1 = min(H-1, int(mxy - origin_y))
+            dx = x2 - x1; dy = y2 - y1
+            segL2 = dx*dx + dy*dy or 1e-9
+            for py in range(iy0, iy1+1):
+                wy = origin_y + (py + 0.5) * pixel_mm
+                for px in range(ix0, ix1+1):
+                    wx = origin_x + (px + 0.5) * pixel_mm
+                    # distance point to segment
+                    t = ((wx - x1)*dx + (wy - y1)*dy) / segL2
+                    if t < 0.0:  qx, qy = x1, y1
+                    elif t > 1.0: qx, qy = x2, y2
+                    else:        qx, qy = x1 + t*dx, y1 + t*dy
+                    ddx = wx - qx; ddy = wy - qy
+                    if (ddx*ddx + ddy*ddy) <= (half*half):
+                        buf[py*W + px] = 255
+
+    halfL = MARKER_LENGTH_MM * 0.5
+    halfW = MARKER_THICKNESS_MM * 0.5
+    for (cx, cy, ux, uy, vx, vy, hL, hW) in markers:
+        corners = [
+            (cx - ux*hL - vx*hW, cy - uy*hL - vy*hW),
+            (cx + ux*hL - vx*hW, cy + uy*hL - vy*hW),
+            (cx + ux*hL + vx*hW, cy + uy*hL + vy*hW),
+            (cx - ux*hL + vx*hW, cy - uy*hL + vy*hW),
+        ]
+        mnx = math.floor(min(p[0] for p in corners)); mxx = math.ceil(max(p[0] for p in corners))
+        mny = math.floor(min(p[1] for p in corners)); mxy = math.ceil(max(p[1] for p in corners))
+        ix0 = max(0, int(mnx - origin_x)); iy0 = max(0, int(mny - origin_y))
+        ix1 = min(W-1, int(mxx - origin_x)); iy1 = min(H-1, int(mxy - origin_y))
+        for py in range(iy0, iy1+1):
+            wy = origin_y + (py + 0.5) * pixel_mm
+            for px in range(ix0, ix1+1):
+                wx = origin_x + (px + 0.5) * pixel_mm
+                dx = wx - cx; dy = wy - cy
+                t = dx*ux + dy*uy
+                w = dx*vx + dy*vy
+                if (abs(t) <= hL) and (abs(w) <= hW):
+                    buf[py*W + px] = 255
+
+    meta = {"origin_x": origin_x, "origin_y": origin_y, "W": W, "H": H, "pixel_mm": pixel_mm}
+    _rmap_save(rpath, meta, bytes(buf))
+    return {"path": rpath, "meta": meta, "data": bytes(buf)}
+
 def curvature_change_markers(segs: List[object]) -> List[Tuple[Pt, float]]:
     def kappa(s: object) -> float:
         if isinstance(s, SegArc): return (1.0 if s.sweepDeg >= 0.0 else -1.0)/max(1e-9, s.radiusMM)
@@ -217,8 +348,8 @@ DEFAULT_SIM_PARAMS = {
     "motor_time_constant_s": 0.010,
     "simulation_step_dt_ms": 1.0,
     "sensor_mode": "analog",
-    "value_of_line": 255,
-    "value_of_background": 0,
+    "value_of_line": 0,
+    "value_of_background": 255,
     "analog_variation": 50
 }
 
@@ -239,9 +370,9 @@ def save_sim_params(params: dict) -> None:
     p["motor_time_constant_s"]  = max(0.001, min(0.100, float(p["motor_time_constant_s"])))
     p["simulation_step_dt_ms"] = max(0.5,  min(100.0, float(p["simulation_step_dt_ms"])))
     p["sensor_mode"]            = "digital" if str(p.get("sensor_mode","analog")).lower().startswith("d") else "analog"
-    p["value_of_line"]          = int(max(0, min(1023, int(p["value_of_line"]))))
-    p["value_of_background"]         = int(max(0, min(1023, int(p["value_of_background"]))))
-    p["analog_variation"]       = int(max(0, min(1023, int(p["analog_variation"]))))
+    p["value_of_line"]          = int(max(0, min(255, int(p["value_of_line"]))))
+    p["value_of_background"]         = int(max(0, min(255, int(p["value_of_background"]))))
+    p["analog_variation"]       = int(max(0, min(255, int(p["analog_variation"]))))
     with open(PARAMS_JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(p, f, indent=2, ensure_ascii=False)
 
@@ -295,17 +426,17 @@ class SimulationParamsDialog(QDialog):
         root.addLayout(row4)
 
         row5 = QHBoxLayout()
-        lbl5 = QLabel("Value of line (0..1023)")
+        lbl5 = QLabel("Value of line (0..255)")
         self.sp_line = QSpinBox()
-        self.sp_line.setRange(0, 1023)
+        self.sp_line.setRange(0, 255)
         self.sp_line.setValue(int(params["value_of_line"]))
         row5.addWidget(lbl5); row5.addWidget(self.sp_line)
         root.addLayout(row5)
 
         row6 = QHBoxLayout()
-        lbl6 = QLabel("Value of table (0..1023)")
+        lbl6 = QLabel("Value of table (0..255)")
         self.sp_table = QSpinBox()
-        self.sp_table.setRange(0, 1023)
+        self.sp_table.setRange(0, 255)
         self.sp_table.setValue(int(params["value_of_background"]))
         row6.addWidget(lbl6); row6.addWidget(self.sp_table)
         root.addLayout(row6)
@@ -313,7 +444,7 @@ class SimulationParamsDialog(QDialog):
         row7 = QHBoxLayout()
         lbl7 = QLabel("Analog variation (amplitude)")
         self.sp_vari = QSpinBox()
-        self.sp_vari.setRange(0, 1023)
+        self.sp_vari.setRange(0, 255)
         self.sp_vari.setValue(int(params["analog_variation"]))
         row7.addWidget(lbl7); row7.addWidget(self.sp_vari)
         root.addLayout(row7)
@@ -610,6 +741,16 @@ def suth_hodg_clip(subject, clip):
             s = e
     return output
 
+def point_in_obb(px: float, py: float,
+                 cx: float, cy: float,
+                 ux: float, uy: float, halfL: float,
+                 vx: float, vy: float, halfW: float) -> bool:
+    dx = px - cx
+    dy = py - cy
+    t = dx*ux + dy*uy
+    w = dx*vx + dy*vy
+    return (abs(t) <= halfL) and (abs(w) <= halfW)
+
 def oriented_rect(cx, cy, ux, uy, halfL, vx, vy, halfW):
     return [
         (cx - ux*halfL - vx*halfW, cy - uy*halfL - vy*halfW),
@@ -628,7 +769,7 @@ class SimWorker(QThread):
     sig_fail  = Signal(str)
 
     def __init__(self, track: Dict[str, Any], robot: Robot, controller_fn,
-                params: dict, save_logs: bool, parent=None):
+                params: dict, save_logs: bool, parent=None, track_path: str | None = None):
         super().__init__(parent)
         self.track = track
         self.robot = robot
@@ -646,13 +787,105 @@ class SimWorker(QThread):
 
         self.logger = SimLogger(base_dir=_here) if save_logs else NoopLogger()
         self._marker_logged = False
+        self.track_path = track_path
+
+    def _initial_pose(self):
+        segs = getattr(self, "_segs", None)
+        origin = getattr(self, "_origin", None)
+        tapeW = getattr(self, "_tapeW", None)
+        gates = getattr(self, "_gates", None)
+        if (segs is None) or (origin is None):
+            segs, origin, tapeW = segments_from_json(self.track)
+        if gates:
+            (sa, sb, shdg_run, shdg_base), _ = gates
+            back = (self.robot.envelope.heightMM/2.0) + 250.0
+            pose_gate = Pose(Pt((sa.x + sb.x)*0.5, (sa.y + sb.y)*0.5), shdg_run)
+            pos = advance_straight(pose_gate, -back)
+        else:
+            pos = origin
+        return pos
+
+    def _sensors_world_xy(self, x, y, h_deg):
+        ang = math.radians(h_deg)
+        ox, oy = self.robot.originXMM, self.robot.originYMM
+        sx, sy = [], []
+        for s in self.robot.sensors:
+            rx, ry = rot(s.xMM - ox, s.yMM - oy, ang)
+            sx.append(x + rx); sy.append(y + ry)
+        return sx, sy
+
+    def _coverage_from_raster_batch(self, sx, sy, size_mm, grid_n: int = 3):
+        """Return fractional coverage [0..1] for each sensor by sampling the 1mm raster."""
+        meta = getattr(self, "_rmap_meta", None)
+        data = getattr(self, "_rmap_data", None)
+        if not meta or not data:
+            return [0.0 for _ in sx]
+        W = int(meta["W"]); H = int(meta["H"])
+        origin_x = float(meta["origin_x"]); origin_y = float(meta["origin_y"])
+        pix = float(meta.get("pixel_mm", 1.0)) or 1.0
+        mv = memoryview(data)
+        half = float(size_mm) * 0.5
+        if grid_n <= 1:
+            offs = [(0.0, 0.0)]
+        else:
+            step = (2.0*half)/(grid_n-1)
+            offs = [(i*step-half, j*step-half) for j in range(grid_n) for i in range(grid_n)]
+        denom = float(len(offs))
+        out = []
+        for cx, cy in zip(sx, sy):
+            k = 0
+            for dx, dy in offs:
+                wx = cx + dx; wy = cy + dy
+                px = int((wx - origin_x) // pix)
+                py = int((wy - origin_y) // pix)
+                if 0 <= px < W and 0 <= py < H:
+                    if mv[py*W + px] != 0:
+                        k += 1
+            out.append(k/denom if denom > 0 else 0.0)
+        return out
+
+
+    def _estimate_coverage_batch(self, sx, sy, x, y, h_deg, tape_half, sensor_half_unused):
+        try:
+            N = len(sx)
+            xs = (c_double * N)(*sx)
+            ys = (c_double * N)(*sy)
+            out = (c_double * N)()
+            if self.robot.sensors:
+                size_default = float(self.robot.sensors[0].sizeMM)
+            else:
+                size_default = 5.0
+            _linesim.estimate_sensors_coverage_batch_C(
+                xs, ys, N,
+                self._poly_ptr, self._poly_n,
+                c_double(tape_half),
+                None, c_double(size_default),
+                c_int(3),
+                out
+            )
+            return [out[i] for i in range(N)]
+        except Exception:
+            return [0.0 for _ in sx]
+
+    def _apply_marker_overrides(self, sx, sy, base_cov):
+            if not self._markers_obb:
+                return base_cov
+            out = list(base_cov)
+            for i in range(len(sx)):
+                px, py = sx[i], sy[i]
+                for (mcx, mcy, mux, muy, mvx, mvy, mhalfL, mhalfW) in self._markers_obb:
+                    if point_in_obb(px, py, mcx, mcy, mux, muy, mhalfL, mvx, mvy, mhalfW):
+                        out[i] = 1.0
+                        break
+            return out
 
     def envelope_contacts_tape(self, x, y, h_deg, tape_half_with_margin) -> bool:
         cx = x - self.robot.originXMM
         cy = y - self.robot.originYMM
+        h_rad = math.radians(h_deg)
         hit = _linesim.envelope_contacts_tape_C(
             cx, cy,
-            h_deg,
+            h_rad,
             self.robot.envelope.widthMM,
             self.robot.envelope.heightMM,
             self._poly_ptr, self._poly_n,
@@ -672,7 +905,7 @@ class SimWorker(QThread):
             nx, ny = math.sin(a), -math.cos(a)
             base = (tapeW*0.5) + MARKER_OFFSET_MM
             cx, cy = pp.x + nx*base, pp.y + ny*base
-            rects.append(oriented_rect(cx, cy, nx, ny, halfL, tx, ty, halfW))
+            rects.append((cx, cy, nx, ny, tx, ty, halfL, halfW))
 
         if gates:
             (sa, sb, shdg_run, shdg_base), (fa, fb, fhdg_run, fhdg_base) = gates
@@ -684,215 +917,156 @@ class SimWorker(QThread):
                 mx, my = (pa.x + pb.x)*0.5, (pa.y + pb.y)*0.5
                 base = (tapeW*0.5) + MARKER_OFFSET_MM
                 cx, cy = mx + nx*base, my + ny*base
-                rects.append(oriented_rect(cx, cy, nx, ny, halfL, tx, ty, halfW))
+                rects.append((cx, cy, nx, ny, tx, ty, halfL, halfW))
 
             add_right_rect(sa, sb, shdg_base)
             add_right_rect(fa, fb, fhdg_base)
 
         return rects
 
+    def _prepare_track_geometry(self):
+        segs, origin, tapeW = segments_from_json(self.track)
+        pts = segments_polyline(segs, step=1.0)
+        n = len(pts)
+        poly_arr = (CPoint * n)(*[(CPoint(p.x, p.y)) for p in pts])
+        self._poly_ptr, self._poly_n = poly_arr, n
+        self._segs, self._origin, self._tapeW = segs, origin, tapeW
+        self._gates = start_finish_lines(self.track, segs, tapeW)
+        self._markers_obb = self.build_markers(segs, tapeW, self._gates)
+
+        if self.track_path:
+            info = ensure_track_raster(self.track_path, self.track, segs, tapeW, self._gates)
+            self._rmap_meta = info["meta"]
+            self._rmap_data = info["data"]
+            self._rmap_arr = (ctypes.c_ubyte * len(self._rmap_data)).from_buffer_copy(self._rmap_data)
+            self._rmap_ptr = ctypes.cast(self._rmap_arr, ctypes.POINTER(ctypes.c_ubyte))
+        else:
+            self._rmap_meta = None
+            self._rmap_data = b""
+            self._rmap_ptr = None
+
+        return segs, origin, tapeW
+
     def run(self):
         try:
-            segs, origin, tapeW = segments_from_json(self.track)
-            poly = segments_polyline(segs, step=0.5)
-            _poly_arr = (CPoint * len(poly))(*(CPoint(p.x, p.y) for p in poly))
-            _poly_ptr = ctypes.cast(_poly_arr, POINTER(CPoint))
-            _poly_n   = len(poly)
-            self._poly_ptr = _poly_ptr
-            self._poly_n   = _poly_n
+            segs, origin, tapeW = self._prepare_track_geometry()
+            tape_half = float(tapeW) * 0.5
 
-            gates = start_finish_lines(self.track, segs, tapeW)
-            start_gate, finish_gate = (None, None) if (gates is None) else gates
+            start_pose = self._initial_pose()
+            x, y, h = start_pose.p.x, start_pose.p.y, float(start_pose.headingDeg)
 
-            if start_gate is None:
-                x, y, h = origin.p.x, origin.p.y, origin.headingDeg
-                sa = sb = None
-            else:
-                (sa, sb, shdg, _) = start_gate
-                back = (self.robot.envelope.heightMM/2.0) + 10.0
-                pose = Pose(Pt((sa.x+sb.x)/2.0, (sa.y+sb.y)/2.0), shdg)
-                start_pose = advance_straight(pose, -back)
-                x, y, h = start_pose.p.x, start_pose.p.y, start_pose.headingDeg
-
-            zone_checker: Optional[FinishZoneChecker] = None
-            if start_gate is not None and finish_gate is not None:
-                (fa, fb, _, _) = finish_gate
-                zone_checker = FinishZoneChecker(sa, sb, fa, fb, half_width=400.0, eps=5.0)
-                zone_checker.prime(x, y)
-
-            dt = self.dt_s
-            vL = vR = v = w = 0.0
-            prev_v = prev_w = 0.0
-
-            wl = next((ww for ww in self.robot.wheels if ww.id.lower() == "left"), None)
-            wr = next((ww for ww in self.robot.wheels if ww.id.lower() == "right"), None)
-            trackW = abs((wr.yMM if wr else 35.0) - (wl.yMM if wl else -35.0))
-
-            def pwm_to_wheel_v(pwm: int) -> float:
-                pwm = max(-4095, min(4095, int(pwm)))
-                return (pwm/4095.0) * self.v_final
-
-            nS = len(self.robot.sensors)
-            sens_px = (c_double * nS)()
-            sens_py = (c_double * nS)()
-            sens_sz = (c_double * nS)(*([s.sizeMM for s in self.robot.sensors]))
-            cov_out = (c_double * nS)()
-
-            steps_out: List[Dict[str, Any]] = []
-            CHUNK_STEPS = 100
-            MAX_MS = 300000
-            reason = "timeout"
-
-            random.seed(datetime.now().timestamp())
-
-            self.logger.log_event("init", 0, x, y, h, {"note": "simulation started"})
-
-            markers = self.build_markers(segs, tapeW, gates)
-
-            enter_t_ms = None
-
-            t_s = 0.0
+            vL = 0.0; vR = 0.0; v = 0.0; w = 0.0
+            prev_v = 0.0; prev_w = 0.0
+            trackW = abs(self.robot.wheels[-1].yMM - self.robot.wheels[0].yMM) if len(self.robot.wheels) >= 2 else 120.0  # use lateral (Y) distance between wheels
+            dt = float(self.dt_s)
             t_ms = 0
 
-            while t_ms < MAX_MS:
-                if self.cancelled:
-                    reason = "user_stop"
-                    self.logger.log_event("user_stop", t_ms, x, y, h, {})
-                    break
+            zone = None
+            if self._gates:
+                (sa, sb, shdg_run, shdg_base), (fa, fb, *_rest) = self._gates
+                zone = FinishZoneChecker(sa, sb, fa, fb)
+                zone.prime(x, y)
 
-                a = math.radians(h)
-                ca, sa_ = math.cos(a), math.sin(a)
-                for i, s in enumerate(self.robot.sensors):
-                    rx = ca*s.xMM - sa_*s.yMM
-                    ry = sa_*s.xMM + ca*s.yMM
-                    sens_px[i] = x + rx
-                    sens_py[i] = y + ry
+            CHUNK = 200
+            chunk_buf = []
 
-                _linesim.estimate_sensors_coverage_batch_C(
-                    sens_px, sens_py, nS,
-                    _poly_ptr, _poly_n,
-                    tapeW*0.5,
-                    sens_sz, 5.0, 3,
-                    cov_out
-                )
+            env_w = float(self.robot.envelope.widthMM)
+            env_h = float(self.robot.envelope.heightMM)
+            tape_half_with_margin = tape_half
 
-                sn_vals = []
-                ang = math.radians(h)
-                tx, ty = math.cos(ang), math.sin(ang)
-                nx, ny = -math.sin(ang), math.cos(ang)
-                marker_hit_this_step = False
+            sensor_half = float(self.robot.sensors[0].sizeMM) * 0.5 if self.robot.sensors else 2.5
 
-                for i, s in enumerate(self.robot.sensors):
-                    px, py = sens_px[i], sens_py[i]
+            while not self.cancelled:
+                sx, sy = self._sensors_world_xy(x, y, h)
+                cov = self._coverage_from_raster_batch(sx, sy, sensor_half*2.0, grid_n=3)
+                sn_vals = [sensor_value_from_coverage(
+                    cov[i], self.sensor_mode, self.value_of_line, self.value_of_background, self.analog_variation
+                ) for i in range(len(cov))]
 
-                    halfS = 0.5 * float(s.sizeMM)
-                    sensor_rect = oriented_rect(px, py, tx, ty, halfS, nx, ny, halfS)
-                    area_sensor = (2*halfS)*(2*halfS)
+                a_lin = (v - prev_v) / max(1e-9, dt)
+                a_ang = (w - prev_w) / max(1e-9, dt)
 
-                    cov_marker = 0.0
-                    for Rm in markers:
-                        interA = rect_rect_overlap_area(sensor_rect, Rm)
-                        if interA <= 0.0:
-                            continue
-                        cov_marker = max(cov_marker, interA / area_sensor)
-
-                    cov = max(float(cov_out[i]), cov_marker)
-
-                    if cov_marker > 0.0:
-                        marker_hit_this_step = True
-
-                    sn_vals.append(sensor_value_from_coverage(
-                        cov,
-                        self.sensor_mode,
-                        self.value_of_line,
-                        self.value_of_background,
-                        self.analog_variation
-                    ))
-
-                if (not self._marker_logged) and marker_hit_this_step:
-                    self._marker_logged = True
-                    self.logger.log_event("marker_touch", t_ms, x, y, h, {})
-
-                a_lin = (v - prev_v) / dt
-                a_ang = (w - prev_w) / dt
                 state = {
                     "t_ms": t_ms,
-                    "pose": {"x_mm": x, "y_mm": y, "heading_deg": h},
-                    "vel": {"v_mm_s": v, "omega_rad_s": w},
-                    "accel": {"a_lin_mm_s2": a_lin, "alpha_rad_s2": a_ang},
-                    "sensors": {"values": sn_vals},
-                    "wheels": {"v_left_mm_s": vL, "v_right_mm_s": vR}
+                    "x_mm": x, "y_mm": y, "heading_deg": h,
+                    "v_mm_s": v, "omega_rad_s": w,
+                    "a_lin_mm_s2": a_lin, "alpha_rad_s2": a_ang,
+                    "sensors": sn_vals,
+                    "v_left_mm_s": vL, "v_right_mm_s": vR,
                 }
-                ctrl = self.controller_fn(state)
-                pwmL = int(ctrl.get("pwm_left", 0))
-                pwmR = int(ctrl.get("pwm_right", 0))
 
-                vL_cmd = pwm_to_wheel_v(pwmL)
-                vR_cmd = pwm_to_wheel_v(pwmR)
-                alpha = 1.0 - math.exp(-dt/self.tau)
-                vL += (vL_cmd - vL)*alpha
-                vR += (vR_cmd - vR)*alpha
+                try:
+                    out = self.controller_fn(state)
+                    pwmL = int(out.get("pwm_left", 1500)) if isinstance(out, dict) else 1500
+                    pwmR = int(out.get("pwm_right", 1500)) if isinstance(out, dict) else 1500
+                except Exception as e:
+                    print(f"[Controller Error] {e}")
+                    pwmL, pwmR = 1500, 1500
 
+                ox = c_double(); oy = c_double(); oh = c_double()
+                o_vL = c_double(); o_vR = c_double(); o_v = c_double(); o_w = c_double()
                 prev_v, prev_w = v, w
-                v = 0.5*(vL + vR)
-                w = (vR - vL)/max(1e-6, trackW)
+                _linesim.step_dynamics_C(
+                    c_double(x), c_double(y), c_double(h),
+                    c_double(vL), c_double(vR),
+                    c_int(pwmL), c_int(pwmR),
+                    c_double(self.v_final), c_double(self.tau), c_double(trackW), c_double(dt),
+                    ctypes.byref(ox), ctypes.byref(oy), ctypes.byref(oh),
+                    ctypes.byref(o_vL), ctypes.byref(o_vR),
+                    ctypes.byref(o_v), ctypes.byref(o_w)
+                )
+                prev_pose = (x, y, h)
+                x, y, h = ox.value, oy.value, oh.value
+                vL, vR, v, w = o_vL.value, o_vR.value, o_v.value, o_w.value
 
-                prev_x, prev_y, prev_h = x, y, h
-                h += math.degrees(w*dt)
-                a = math.radians(h)
-                x += v*dt*math.cos(a)
-                y += v*dt*math.sin(a)
 
+                try:
+                    if self._rmap_ptr and self._rmap_meta:
+                        cx = x - self.robot.originXMM
+                        cy = y - self.robot.originYMM
+                        hit = _linesim.envelope_contacts_raster_C(
+                            c_double(cx), c_double(cy), c_double(math.radians(h)),
+                            c_double(env_w), c_double(env_h),
+                            self._rmap_ptr, c_int(self._rmap_meta["W"]), c_int(self._rmap_meta["H"]),
+                            c_double(self._rmap_meta["origin_x"]), c_double(self._rmap_meta["origin_y"]), c_double(self._rmap_meta["pixel_mm"])
+                        )
+                    else:
+                        hit = 1
+                except Exception:
+                    hit = 1
+
+                finished = False
+                if zone is not None:
+                    finished = zone.update(prev_pose, (x, y, h), env_w, env_h, t_ms)
+
+                step = {
+                    "t_ms": t_ms,
+                    "x_mm": x, "y_mm": y, "heading_deg": h,
+                    "v_mm_s": v, "omega_rad_s": w,
+                    "a_lin_mm_s2": a_lin, "alpha_rad_s2": a_ang,
+                    "sensors": sn_vals,
+                    "v_left_mm_s": vL, "v_right_mm_s": vR,
+                }
                 self.logger.log_step(t_ms, x, y, h, v, w, pwmL, pwmR, sensors=sn_vals)
-
-                if zone_checker is not None:
-                    finished = zone_checker.update(
-                        (prev_x, prev_y, prev_h),
-                        (x, y, h),
-                        self.robot.envelope.widthMM,
-                        self.robot.envelope.heightMM,
-                        t_ms
-                    )
-                    if zone_checker.last_event:
-                        self.logger.log_event(zone_checker.last_event, t_ms, x, y, h, {})
-                    if finished:
-                        enter_t_ms = t_ms
-                    if (enter_t_ms is not None) and (t_ms - enter_t_ms >= 100):
-                        reason = "finished"
-                        self.logger.log_event("finished", t_ms, x, y, h, {"enter_t_ms": enter_t_ms})
-                        break
-
-                tape_half_with_margin = (tapeW * 0.5) + 25.0
-                if not self.envelope_contacts_tape(x, y, h, tape_half_with_margin):
-                    reason = "offtrack"
-                    self.logger.log_event("offtrack", t_ms, x, y, h, {"criterion": "envelope-not-touching"})
+                chunk_buf.append(step)
+                if len(chunk_buf) >= CHUNK:
+                    self.sig_chunk.emit(chunk_buf)
+                    chunk_buf = []
+                t_ms += int(round(dt * 1000.0))
+                if finished or (self._rmap_ptr and not hit):
+                    break
+                if t_ms > 100000:
                     break
 
-                steps_out.append({
-                    "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h,
-                    "v_mm_s": v, "omega_rad_s": w, "pwmL": pwmL, "pwmR": pwmR
-                })
-                if len(steps_out) >= CHUNK_STEPS:
-                    self.sig_chunk.emit(steps_out); steps_out = []
-
-                t_s += dt
-                t_ms = int(round(t_s * 1000.0))
-
-            if steps_out:
-                self.sig_chunk.emit(steps_out)
-            if reason == "timeout":
-                self.logger.log_event("timeout", t_ms, x, y, h, {})
-
+            if chunk_buf:
+                self.sig_chunk.emit(chunk_buf)
             self.logger.flush()
-            self.sig_done.emit({
-                "ok": True,
-                "reason": reason,
-                "csv": getattr(self.logger, "csv_path", ""),
-                "json": getattr(self.logger, "json_path", ""),
-                "dt_s": self.dt_s
-            })
+            self.sig_done.emit({"dt_s": self.dt_s})
         except Exception as e:
-            self.sig_fail.emit(str(e))
+            try:
+                self.sig_fail.emit(str(e))
+            except Exception:
+                pass
 
 class SimScene(QGraphicsScene):
     def __init__(self):
@@ -1193,6 +1367,10 @@ class MainWindow(QMainWindow):
         if not path: return
         with open(path, "r", encoding="utf-8") as f:
             self.track = json.load(f)
+        self.track_path = path
+        segs, origin, tapeW = segments_from_json(self.track)
+        gates = start_finish_lines(self.track, segs, tapeW)
+        _ = ensure_track_raster(self.track_path, self.track, segs, tapeW, gates)
         self.draw_static_track()
         if self.robot: self.draw_robot_outline_preview()
         base = os.path.basename(path)
@@ -1422,7 +1600,8 @@ class MainWindow(QMainWindow):
         self.worker = SimWorker(
             self.track, self.robot, self.controller_fn,
             params=p,
-            save_logs=save_logs
+            save_logs=save_logs,
+            track_path=getattr(self, 'track_path', None)
         )
         self.worker.sig_chunk.connect(self.on_stream_chunk)
         self.worker.sig_done.connect(self.on_stream_done)
