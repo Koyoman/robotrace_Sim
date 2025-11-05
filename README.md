@@ -75,10 +75,10 @@ python track_editor.py    # Track Editor (design tracks)
 python robot_editor.py    # Robot Editor (configure robot geometry & sensors)
 
 # 3) (Optional) Adjust Simulation Parameters via the Simulator UI
-python simulation.py      # open simulator → Simulation parameters → Save
+python simulator.py      # open simulator → Simulation parameters → Save
 
 # 4) Run a simulation
-python simulation.py      # load Track (.json), Robot (.json), Controller (.py), then Start
+python simulator.py      # load Track (.json), Robot (.json), Controller (.py), then Start
 ```
 
 ---
@@ -124,63 +124,44 @@ Plug your controller as a `.py` file. The simulator loads it dynamically and cal
 def control_step(state: dict) -> dict:
     """
     Called every simulation step. Must be non-blocking.
-    The simulator passes EXACTLY the following structure and units:
+    The simulator passes the following structure and units:
 
     Parameters
     ----------
     state : dict
-
         state = {
-            "t_ms": int,  # elapsed time [ms] since start (monotonic, starts at 0)
+            "t_ms": int,                   # elapsed time [ms] since start (monotonic, starts at 0)
 
-            "pose": {
-                "x_mm": float,        # robot origin X in track coordinates [mm]
-                "y_mm": float,        # robot origin Y in track coordinates [mm]
-                "heading_deg": float  # heading [deg]; 0° = +X axis of the track; positive is CCW
-            },
+            # Pose and kinematics (track/world frame)
+            "x_mm": float,                 # robot origin X [mm]
+            "y_mm": float,                 # robot origin Y [mm]
+            "heading_deg": float,          # heading [deg]; 0° = +X axis; CCW positive
+            "v_mm_s": float,               # linear velocity [mm/s]
+            "omega_rad_s": float,          # angular velocity [rad/s]
+            "a_lin_mm_s2": float,          # linear acceleration [mm/s²]
+            "alpha_rad_s2": float,         # angular acceleration [rad/s²]
 
-            "vel": {
-                "v_mm_s": float,      # linear velocity [mm/s] (after wheel dynamics)
-                "omega_rad_s": float  # angular velocity [rad/s]; positive is CCW
-            },
+            # Sensors
+            "sensors": list[int],          # per-sensor readings (0–1023)
 
-            "accel": {
-                "a_lin_mm_s2": float,   # linear acceleration [mm/s²]
-                "alpha_rad_s2": float   # angular acceleration [rad/s²]
-            },
-
-            "sensors": {
-                "values": list[int]     # per-sensor readings (0–1023). Index = sensor id in robot-spec
-            },
-
-            "wheels": {
-                "v_left_mm_s": float,   # left wheel linear speed [mm/s]
-                "v_right_mm_s": float   # right wheel linear speed [mm/s]
-            }
+            # Wheel linear speeds after motor model
+            "v_left_mm_s": float,
+            "v_right_mm_s": float,
         }
 
     Returns
     -------
-    dict
-        {
-            "pwm_left":  int,   # command in [-4095, 4095]
-            "pwm_right": int    # command in [-4095, 4095]
-        }
-
-    Notes
-    -----
-    - Commands outside [-4095, 4095] are clipped internally before converting to wheel speed.
-    - Use `t_ms * 1e-3` if you prefer seconds.
-    - (x_mm, y_mm) is the robot **origin**; geometry comes from `robot-spec.json`.
-    - `values` are already ordered as defined in the robot spec.
+    dict: {"pwm_left": int, "pwm_right": int}  # target PWMs (e.g., 1000..3000)
     """
-
-    # Example (read sensors & keep motors off):
-    sn = state["sensors"]["values"]
-    t  = state["t_ms"] * 1e-3  # seconds if needed
-
-    # TODO: your control logic here
-    return {"pwm_left": 0, "pwm_right": 0}
+    # Example: naive P-controller using a 5-sensor array (center = index 2)
+    vals = state["sensors"]
+    if not vals:
+        return {"pwm_left": 1500, "pwm_right": 1500}
+    idx = max(range(len(vals)), key=lambda i: vals[i])  # brightest as 'line'
+    error = (idx - (len(vals)-1)/2)
+    K = 120
+    base = 1800
+    return {"pwm_left": int(base - K*error), "pwm_right": int(base + K*error)}
 ```
 
 
@@ -222,7 +203,7 @@ Export logs and compute comparable metrics (lap time, off-track count, RMS error
 
 ```
 RobotraceSim/
-├── simulation.py                 # Simulator UI & run loop
+├── simulator.py                  # Simulator UI & run loop
 ├── track_editor.py               # Track Editor
 ├── robot_editor.py               # Robot Editor
 ├── simulation_parameters.json    # Simulation settings (UI-sync)
