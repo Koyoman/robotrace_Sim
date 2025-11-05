@@ -7,7 +7,7 @@ library (linesim.dll) for the heavy geometry/physics and draws results with Qt.
 Comments and docstrings are written in plain English to help beginners.
 """
 from __future__ import annotations
-import os, sys, math, json, csv, ctypes, importlib.util, random, time, zlib
+import os, sys, math, json, csv, ctypes, importlib, importlib.util, random, time, zlib
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
 
@@ -1162,6 +1162,8 @@ class MainWindow(QMainWindow):
         self.v_max_mm_s = None
 
         self.controller_path = None
+        self.robot_path = None
+        self.track_path = None
         self.lbl_ctrl_status = QLabel("—")
         self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
 
@@ -1236,6 +1238,10 @@ class MainWindow(QMainWindow):
         row_track_layout.addWidget(self.lbl_track_status)
         form.addRow(row_track)
         form.addRow(self.chk_log)
+        self.btn_reload = QPushButton("Reload files")
+        self.btn_reload.setToolTip("Reload the last loaded track, robot, and controller from disk (no dialogs). Useful when tuning the PID/controller to grab the latest code and JSONs.")
+        form.addRow(self.btn_reload)
+        self.btn_reload.clicked.connect(self.on_reload_files)
         form.addRow(QLabel("<b>Simulation Control</b>"))
         self.step_count = 0
         self.lbl_progress = QLabel("Executed steps: 0")
@@ -1426,6 +1432,7 @@ class MainWindow(QMainWindow):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.robot = robot_from_json(json.load(f))
+            self.robot_path = path
             base = os.path.basename(path)
             self.statusBar().showMessage(f"Robot: {base}", 5000)
             if hasattr(self, "lbl_robot_status"):
@@ -1474,6 +1481,78 @@ class MainWindow(QMainWindow):
             self.lbl_ctrl_status.setStyleSheet("color: #c62828; font-weight: 600;")
             self.statusBar().showMessage("Controller load failed", 5000)
             QMessageBox.critical(self, "Controller load error", str(e))
+
+    def on_reload_files(self):
+        """Reload the last loaded track, robot, and controller from disk without dialogs.
+        Useful when you edit the controller (PID tuning) or JSON files and want the latest version."""
+        try:
+            if self.worker and self.worker.isRunning():
+                QMessageBox.warning(self, "Reload not allowed", "Stop the running simulation before reloading files.")
+                return
+        except Exception:
+            pass
+
+        reloaded = []
+
+        if getattr(self, "track_path", None):
+            try:
+                with open(self.track_path, "r", encoding="utf-8") as f:
+                    self.track = json.load(f)
+                segs, origin, tapeW = segments_from_json(self.track)
+                gates = start_finish_lines(self.track, segs, tapeW)
+                try:
+                    _ = ensure_track_raster(self.track_path, self.track, segs, tapeW, gates)
+                except Exception:
+                    pass
+                self.draw_static_track()
+                if self.robot:
+                    self.draw_robot_outline_preview()
+                base = os.path.basename(self.track_path)
+                if hasattr(self, "lbl_track_status"):
+                    self.lbl_track_status.setText(f"{base}   ✓")
+                    self.lbl_track_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+                    self.lbl_track_status.setToolTip(self.track_path)
+                reloaded.append("track")
+            except Exception as e:
+                QMessageBox.critical(self, "Track reload error", f"{self.track_path}\n{e}")
+
+        if getattr(self, "robot_path", None):
+            try:
+                with open(self.robot_path, "r", encoding="utf-8") as f:
+                    self.robot = robot_from_json(json.load(f))
+                if self.track:
+                    self.draw_robot_outline_preview()
+                base = os.path.basename(self.robot_path)
+                if hasattr(self, "lbl_robot_status"):
+                    self.lbl_robot_status.setText(f"{base}   ✓")
+                    self.lbl_robot_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+                    self.lbl_robot_status.setToolTip(self.robot_path)
+                reloaded.append("robot")
+            except Exception as e:
+                QMessageBox.critical(self, "Robot reload error", f"{self.robot_path}\n{e}")
+
+        if getattr(self, "controller_path", None):
+            try:
+                importlib.invalidate_caches()
+                self.controller_fn = import_controller(self.controller_path)
+                base = os.path.basename(self.controller_path)
+                if hasattr(self, "lbl_ctrl_status"):
+                    self.lbl_ctrl_status.setText(f"{base}   ✓")
+                    self.lbl_ctrl_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+                    self.lbl_ctrl_status.setToolTip(self.controller_path)
+                try:
+                    self.btn_ctrl.setStyleSheet("background: #e8f5e9;")
+                    QTimer.singleShot(600, lambda: self.btn_ctrl.setStyleSheet(""))
+                except Exception:
+                    pass
+                reloaded.append("controller")
+            except Exception as e:
+                QMessageBox.critical(self, "Controller reload error", f"{self.controller_path}\n{e}")
+
+        if reloaded:
+            self.statusBar().showMessage("Reloaded: " + ", ".join(reloaded), 4000)
+        else:
+            self.statusBar().showMessage("Nothing to reload (no paths set).", 4000)
 
     def clear_static(self):
         """Remove all static scene items and forget cached QGraphicsPathItems."""
