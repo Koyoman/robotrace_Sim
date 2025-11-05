@@ -22,7 +22,6 @@ from Utils.track_model import TrackModel, StartFinishCfg
 
 # ---------- Scene ----------
 class TrackScene(QGraphicsScene):
-    """Draws the track, curvature markers, and start/finish gates."""
     def __init__(self, model: TrackModel):
         super().__init__()
         self.model = model
@@ -34,7 +33,6 @@ class TrackScene(QGraphicsScene):
 
     def drawBackground(self, painter: QPainter, rect):
         super().drawBackground(painter, rect)
-        # Subtle grid based on model grid step
         step = max(5.0, self.model.gridStepMM)
         pen = QPen(QColor(25, 25, 25), 1)
         painter.setPen(pen)
@@ -52,10 +50,8 @@ class TrackScene(QGraphicsScene):
         t.setPos(x, y)
 
     def rebuild(self):
-        """Regenerate all scene items from the current model state."""
         self.clear()
 
-        # Build segments with absolute poses
         cur = self.model.origin
         segs: list[AnySeg] = []
         seg_paths: list[QPainterPath] = []
@@ -73,7 +69,6 @@ class TrackScene(QGraphicsScene):
             seg_paths.append(path)
             segs.append(seg)
 
-        # Full track polyline
         pts = segments_to_polyline(segs)
         if len(pts) >= 2:
             full = QPainterPath(QPointF(pts[0].x, pts[0].y))
@@ -83,7 +78,6 @@ class TrackScene(QGraphicsScene):
                                     Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
             self.addPath(full, QPen(QColor("#444444"), 1, Qt.DashLine))
 
-        # Curvature-change markers (left side of the track)
         for (p, hdg) in curvature_change_markers(segs):
             hrad = rad(hdg)
             nx, ny = math.sin(hrad), -math.cos(hrad)
@@ -93,7 +87,6 @@ class TrackScene(QGraphicsScene):
             self.addLine(ax, ay, bx, by, QPen(QColor("#FFFFFF"), MARKER_THICKNESS_MM,
                                               Qt.SolidLine, Qt.RoundCap))
 
-        # Start/Finish gates and their right-side ticks
         if self.model.startFinish.enabled and self.model.startFinish.onSegmentId:
             seg = next((s for s in segs if isinstance(s, SegStraight) and s.id == self.model.startFinish.onSegmentId), None)
             if seg:
@@ -106,7 +99,6 @@ class TrackScene(QGraphicsScene):
                           ((finish_pose, "Start"), (start_pose, "Finish"))
 
                 for gate_pose, label in mapping:
-                    # Cross bar
                     hrad = rad(gate_pose.headingDeg)
                     nx, ny = -math.sin(hrad), math.cos(hrad)
                     half = (self.model.tapeWidthMM * 1.2) * 0.5
@@ -114,37 +106,38 @@ class TrackScene(QGraphicsScene):
                     bx, by = gate_pose.p.x - nx*half, gate_pose.p.y - ny*half
                     self.addLine(ax, ay, bx, by, QPen(QColor("#FFD54F"), 4))
 
-                    # Right-side tick (visual asymmetry to distinguish sides)
                     base = (self.model.tapeWidthMM * 0.5) + MARKER_OFFSET_MM
                     sx, sy = gate_pose.p.x + nx*base, gate_pose.p.y + ny*base
                     ex, ey = sx + nx*MARKER_LENGTH_MM, sy + ny*MARKER_LENGTH_MM
                     self.addLine(sx, sy, ex, ey, QPen(QColor("#FFD54F"), MARKER_THICKNESS_MM,
                                                       Qt.SolidLine, Qt.RoundCap))
 
-                    # Label near the bar
                     cx, cy = (ax+bx)/2.0, (ay+by)/2.0
                     lx, ly = cx + nx*14, cy + ny*14
                     self._add_label(label, lx, ly, QColor("#FFD54F"))
 
-        # Highlight currently selected segment
+        bbox = self.itemsBoundingRect().united(QRectF(0, 0, self.model.area_widthMM, self.model.area_heightMM))
+        margin = 200.0
+        self.setSceneRect(bbox.adjusted(-margin, -margin, margin, margin))
+
         if self.highlight_index is not None and 0 <= self.highlight_index < len(seg_paths):
             self.addPath(seg_paths[self.highlight_index], QPen(QColor("#00E5FF"), 3, Qt.DashLine))
 
 
-# ---------- View ----------
 class TrackView(QGraphicsView):
     def __init__(self, scene: TrackScene):
         super().__init__(scene)
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
 
     def wheelEvent(self, event):
         s = 1.15 if event.angleDelta().y() > 0 else 1/1.15
         self.scale(s, s)
+        event.accept()
 
-
-# ---------- Main Window ----------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -153,70 +146,133 @@ class MainWindow(QMainWindow):
         self.model = TrackModel()
         self.scene = TrackScene(self.model)
         self.view = TrackView(self.scene)
-        self.view.setSceneRect(0, 0, self.model.area_widthMM, self.model.area_heightMM)
         self._updating_ui = False
 
         controls = QWidget(); form = QFormLayout(controls)
 
-        # Area
+        area_hint = (
+            "Defines the drawing area for the track in millimeters (mm).\n"
+            "Width and Height affect the visible canvas and export size."
+        )
+        grid_hint = "Grid spacing (mm) used for snapping and alignment in the editor."
+        origin_hint = (
+            "Origin pose of the track in millimeters (mm) and degrees (°).\n"
+            "Right-click on the canvas to relocate it; this does not alter existing segments."
+        )
+        segments_hint = (
+            "Build your track by combining straights and circular arcs.\n"
+            "Lengths and radii are in millimeters (mm); angles are in degrees (°)."
+        )
+        length_hint = "Length (mm) of the selected straight segment."
+        radius_hint = "Turn Radius (mm) of the selected arc segment."
+        angle_hint  = "Angle (Deg) swept by the selected arc segment. Positive = left, negative = right."
+        sf_hint = (
+            "Start/Finish gate placement along a straight segment (mm).\n"
+            "Toggle the direction to decide which gate is 'Start'."
+        )
+        sf_seg_hint = "Choose the straight segment that hosts the Start/Finish gates."
+        sparam_hint = "Distance (mm) from the beginning of the chosen straight to place the gate pair."
+        sf_forward_hint = "If checked, 'Start' is at increasing s; otherwise it is at decreasing s."
+        file_hint = "Create, import or export a track file in JSON format."
+
+        area_title = QLabel("<b>Area (mm)</b>")
+        area_title.setToolTip(area_hint)
+        form.addRow(area_title)
+
         self.spin_area_w = QDoubleSpinBox(); self.spin_area_w.setRange(100, 100000); self.spin_area_w.setValue(self.model.area_widthMM)
         self.spin_area_h = QDoubleSpinBox(); self.spin_area_h.setRange(100, 100000); self.spin_area_h.setValue(self.model.area_heightMM)
         self.spin_grid   = QDoubleSpinBox(); self.spin_grid.setRange(5, 1000); self.spin_grid.setValue(self.model.gridStepMM)
-        self.spin_tape   = QDoubleSpinBox(); self.spin_tape.setRange(1, 1000); self.spin_tape.setValue(self.model.tapeWidthMM)
 
-        # Origin
+        self.spin_area_w.setToolTip("Canvas width in millimeters.")
+        self.spin_area_h.setToolTip("Canvas height in millimeters.")
+        self.spin_grid.setToolTip(grid_hint)
+
+        row_area = QHBoxLayout()
+        col_w = QVBoxLayout(); col_w.addWidget(QLabel("Width"));  col_w.addWidget(self.spin_area_w)
+        col_h = QVBoxLayout(); col_h.addWidget(QLabel("Height")); col_h.addWidget(self.spin_area_h)
+        col_g = QVBoxLayout(); col_g.addWidget(QLabel("Grid"));   col_g.addWidget(self.spin_grid)
+        row_area.addLayout(col_w); row_area.addLayout(col_h); row_area.addLayout(col_g)
+        wrap_area = QWidget(); wrap_area.setLayout(row_area)
+        form.addRow(wrap_area)
+
+        origin_title = QLabel("<b>Origin (mm)</b>")
+        origin_title.setToolTip(origin_hint)
+        form.addRow(origin_title)
+
         self.spin_ox = QDoubleSpinBox(); self.spin_ox.setRange(-100000,100000); self.spin_ox.setValue(self.model.origin.p.x)
         self.spin_oy = QDoubleSpinBox(); self.spin_oy.setRange(-100000,100000); self.spin_oy.setValue(self.model.origin.p.y)
         self.spin_oh = QDoubleSpinBox(); self.spin_oh.setRange(-360,360); self.spin_oh.setDecimals(1); self.spin_oh.setValue(self.model.origin.headingDeg)
 
-        form.addRow(QLabel("<b>Area (mm)</b>"))
-        form.addRow("Width (mm)", self.spin_area_w)
-        form.addRow("Height (mm)", self.spin_area_h)
-        form.addRow("Grid step (mm)", self.spin_grid)
-        form.addRow("Tape width (mm)", self.spin_tape)
+        self.spin_ox.setToolTip("Origin X position (mm).")
+        self.spin_oy.setToolTip("Origin Y position (mm).")
+        self.spin_oh.setToolTip("Origin heading (degrees).")
 
-        form.addRow(QLabel("<b>Origin</b>"))
-        form.addRow("X (mm)", self.spin_ox)
-        form.addRow("Y (mm)", self.spin_oy)
-        form.addRow("Angle (°)", self.spin_oh)
+        row_origin = QHBoxLayout()
+        col_x = QVBoxLayout(); col_x.addWidget(QLabel("X")); col_x.addWidget(self.spin_ox)
+        col_y = QVBoxLayout(); col_y.addWidget(QLabel("Y")); col_y.addWidget(self.spin_oy)
+        col_a = QVBoxLayout(); col_a.addWidget(QLabel("Angle (Deg)")); col_a.addWidget(self.spin_oh)
+        row_origin.addLayout(col_x); row_origin.addLayout(col_y); row_origin.addLayout(col_a)
+        wrap_origin = QWidget(); wrap_origin.setLayout(row_origin)
+        form.addRow(wrap_origin)
 
-        # Segments
-        form.addRow(QLabel("<b>Segments</b>"))
-        self.list_segments = QListWidget(); form.addRow(self.list_segments)
-        self.spin_length = QDoubleSpinBox(); self.spin_length.setRange(1, 1e6)
-        self.spin_radius = QDoubleSpinBox(); self.spin_radius.setRange(1, 1e6)
-        self.spin_sweep  = QDoubleSpinBox(); self.spin_sweep.setRange(-1080,1080); self.spin_sweep.setDecimals(1)
-        form.addRow("Length (straight)", self.spin_length)
-        form.addRow("Radius (arc)", self.spin_radius)
-        form.addRow("Sweep (°)", self.spin_sweep)
+        segments_title = QLabel("<b>Segments (mm, °)</b>")
+        segments_title.setToolTip(segments_hint)
+        form.addRow(segments_title)
+
+        self.list_segments = QListWidget(); self.list_segments.setToolTip("List of segments in order. Select to edit.")
+        form.addRow(self.list_segments)
+
+        self.spin_length = QDoubleSpinBox(); self.spin_length.setRange(1, 1e6); self.spin_length.setToolTip(length_hint)
+        self.spin_radius = QDoubleSpinBox(); self.spin_radius.setRange(1, 1e6); self.spin_radius.setToolTip(radius_hint)
+        self.spin_sweep  = QDoubleSpinBox(); self.spin_sweep.setRange(-1080,1080); self.spin_sweep.setDecimals(1); self.spin_sweep.setToolTip(angle_hint)
+
+        row_seg_params = QHBoxLayout()
+        col_len = QVBoxLayout(); col_len.addWidget(QLabel("Length"));       col_len.addWidget(self.spin_length)
+        col_rad = QVBoxLayout(); col_rad.addWidget(QLabel("Turn Radius"));  col_rad.addWidget(self.spin_radius)
+        col_ang = QVBoxLayout(); col_ang.addWidget(QLabel("Angle (Deg)"));  col_ang.addWidget(self.spin_sweep)
+        row_seg_params.addLayout(col_len); row_seg_params.addLayout(col_rad); row_seg_params.addLayout(col_ang)
+        wrap_seg = QWidget(); wrap_seg.setLayout(row_seg_params)
+        form.addRow(wrap_seg)
 
         row_btns = QHBoxLayout()
         self.btn_add_st = QPushButton("Add Straight")
         self.btn_add_ar = QPushButton("Add Arc")
         self.btn_del    = QPushButton("Remove")
         self.btn_ren    = QPushButton("Rename (F2)")
+        self.btn_add_st.setToolTip("Append a straight segment using the current origin pose.")
+        self.btn_add_ar.setToolTip("Append an arc segment (use Turn Radius and Angle (Deg)).")
+        self.btn_del.setToolTip("Delete the selected segment from the list.")
+        self.btn_ren.setToolTip("Rename the selected segment (letters fixed by type, numbers are editable).")
         row_btns.addWidget(self.btn_add_st); row_btns.addWidget(self.btn_add_ar); row_btns.addWidget(self.btn_del); row_btns.addWidget(self.btn_ren)
         form.addRow(row_btns)
 
-        # Start/Finish
-        form.addRow(QLabel("<b>Start/Finish</b>"))
-        self.chk_sf = QCheckBox("Enable Start/Finish")
-        self.combo_sf_seg = QComboBox()
-        self.spin_sf_s = QDoubleSpinBox(); self.spin_sf_s.setRange(0, 1000000); self.spin_sf_s.setValue(500.0)
-        self.slider_sf = QSlider(Qt.Horizontal); self.slider_sf.setRange(0, 10000)
-        self.chk_sf_forward = QCheckBox("Start is forward (+s)")
+        sf_title = QLabel("<b>Start/Finish (mm)</b>")
+        sf_title.setToolTip(sf_hint)
+        form.addRow(sf_title)
+
+        self.chk_sf = QCheckBox("Enable Start/Finish"); self.chk_sf.setToolTip("Enable or disable the gate pair rendering.")
+        self.combo_sf_seg = QComboBox(); self.combo_sf_seg.setToolTip(sf_seg_hint)
+        self.spin_sf_s = QDoubleSpinBox(); self.spin_sf_s.setRange(0, 1000000); self.spin_sf_s.setValue(500.0); self.spin_sf_s.setToolTip(sparam_hint)
+        self.slider_sf = QSlider(Qt.Horizontal); self.slider_sf.setRange(0, 10000); self.slider_sf.setToolTip("Fine slider to adjust the s position.")
+        self.chk_sf_forward = QCheckBox("Start is forward (+s)"); self.chk_sf_forward.setToolTip(sf_forward_hint)
+
         form.addRow(self.chk_sf)
-        form.addRow("Segment (straight)", self.combo_sf_seg)
-        form.addRow("s position (mm)", self.spin_sf_s)
-        form.addRow("Fine adjust s", self.slider_sf)
+        row_sf = QHBoxLayout()
+        col_seg = QVBoxLayout(); col_seg.addWidget(QLabel("Segment (straight)")); col_seg.addWidget(self.combo_sf_seg)
+        col_s   = QVBoxLayout(); col_s.addWidget(QLabel("s position")); col_s.addWidget(self.spin_sf_s)
+        col_f   = QVBoxLayout(); col_f.addWidget(QLabel("Fine adjust s")); col_f.addWidget(self.slider_sf)
+        row_sf.addLayout(col_seg); row_sf.addLayout(col_s); row_sf.addLayout(col_f)
+        wrap_sf = QWidget(); wrap_sf.setLayout(row_sf)
+        form.addRow(wrap_sf)
         form.addRow(self.chk_sf_forward)
 
-        # File actions
         row1 = QHBoxLayout(); row2 = QHBoxLayout()
         btn_new = QPushButton("New")
         btn_open = QPushButton("Import JSON")
         btn_save = QPushButton("Export JSON")
         btn_fit  = QPushButton("Fit to View")
+        for b in (btn_new, btn_open, btn_save, btn_fit):
+            b.setToolTip(file_hint)
         row1.addWidget(btn_new); row1.addWidget(btn_open)
         row2.addWidget(btn_save); row2.addWidget(btn_fit)
         form.addRow(row1); form.addRow(row2)
@@ -227,7 +283,6 @@ class MainWindow(QMainWindow):
         splitter.setSizes([900, 360])
         self.setCentralWidget(splitter)
 
-        # Connections
         self.list_segments.currentRowChanged.connect(self.on_select_segment)
         self.spin_length.valueChanged.connect(self.apply_seg_edit)
         self.spin_radius.valueChanged.connect(self.apply_seg_edit)
@@ -241,7 +296,6 @@ class MainWindow(QMainWindow):
         self.spin_area_w.valueChanged.connect(self.on_area_change)
         self.spin_area_h.valueChanged.connect(self.on_area_change)
         self.spin_grid.valueChanged.connect(self.on_grid_change)
-        self.spin_tape.valueChanged.connect(self.on_tape_change)
 
         self.spin_ox.valueChanged.connect(self.on_origin_change)
         self.spin_oy.valueChanged.connect(self.on_origin_change)
@@ -258,7 +312,6 @@ class MainWindow(QMainWindow):
         btn_save.clicked.connect(self.export_json)
         btn_fit.clicked.connect(self.fit_view)
 
-        # Shortcuts (action labels translated)
         act_open = QAction("Import", self);  act_open.setShortcut("Ctrl+O"); act_open.triggered.connect(self.import_json); self.addAction(act_open)
         act_save = QAction("Export", self);  act_save.setShortcut("Ctrl+S"); act_save.triggered.connect(self.export_json); self.addAction(act_save)
         act_fit  = QAction("Fit", self);     act_fit.setShortcut("Ctrl+F");  act_fit.triggered.connect(self.fit_view);    self.addAction(act_fit)
@@ -269,7 +322,6 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
         self.resize(1320, 820)
 
-    # ---------- helpers ----------
     def fmt_item(self, s: AnySeg) -> str:
         if isinstance(s, SegStraight):
             return f"Straight  {s.id} — L={s.lengthMM:.1f} mm"
@@ -277,10 +329,9 @@ class MainWindow(QMainWindow):
             return f"Arc  {s.id} — R={s.radiusMM:.1f} mm, θ={s.sweepDeg:.1f}°"
 
     def fit_view(self):
-        rect = QRectF(0, 0, self.model.area_widthMM, self.model.area_heightMM)
+        rect = self.scene.sceneRect()
         self.view.fitInView(rect, Qt.KeepAspectRatio)
 
-    # id helpers
     def next_id_for(self, kind: str) -> str:
         if kind == 'straight':
             base = "R"
@@ -302,7 +353,6 @@ class MainWindow(QMainWindow):
             candidate = f"{base}{i}"; i += 1
         return candidate
 
-    # ---------- handlers ----------
     def refresh_list(self, preserve_index=True):
         cur = self.list_segments.currentRow()
         self.list_segments.blockSignals(True)
@@ -313,7 +363,7 @@ class MainWindow(QMainWindow):
         if preserve_index and 0 <= cur < self.list_segments.count():
             self.list_segments.setCurrentRow(cur)
         elif self.list_segments.count():
-            self.list_segments.setCurrentRow(0)
+            self.list_segments.setCurrentRow(self.list_segments.count() - 1)
 
     def refresh_sf_combo(self):
         self.combo_sf_seg.blockSignals(True)
@@ -372,11 +422,17 @@ class MainWindow(QMainWindow):
 
     def del_segment(self):
         row = self.list_segments.currentRow()
+        if row < 0 and self.list_segments.count() > 0:
+            row = self.list_segments.count() - 1
+            self.list_segments.setCurrentRow(row)
         if 0 <= row < len(self.model.segments):
             if self.model.startFinish.onSegmentId == self.model.segments[row].id:
                 self.model.startFinish.onSegmentId = None
             del self.model.segments[row]
-            self.refresh_list(True); self.scene.rebuild(); self.refresh_sf_combo()
+            self.refresh_list(True)
+            if self.list_segments.count():
+                self.list_segments.setCurrentRow(min(row, self.list_segments.count()-1))
+            self.scene.rebuild(); self.refresh_sf_combo()
 
     def rename_segment(self):
         row = self.list_segments.currentRow()
@@ -397,27 +453,19 @@ class MainWindow(QMainWindow):
                 self.refresh_sf_combo()
                 self.scene.rebuild()
 
-    # Area/origin/tape
     def on_area_change(self):
         self.model.area_widthMM = self.spin_area_w.value()
         self.model.area_heightMM = self.spin_area_h.value()
-        self.view.setSceneRect(0, 0, self.model.area_widthMM, self.model.area_heightMM)
         self.scene.rebuild()
 
     def on_grid_change(self):
         self.model.gridStepMM = self.spin_grid.value()
         self.scene.rebuild()
 
-    def on_tape_change(self):
-        self.model.tapeWidthMM = self.spin_tape.value()
-        self.scene.rebuild()
-
     def on_origin_change(self):
         self.model.origin = Pose(Pt(self.spin_ox.value(), self.spin_oy.value()), self.spin_oh.value())
-        # Origin is only a reference for visualization; segments keep their accumulated poses
         self.scene.rebuild()
 
-    # Start/finish controls
     def on_sf_change(self):
         sf = self.model.startFinish
         sf.enabled = self.chk_sf.isChecked()
@@ -428,11 +476,9 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_sf_slider(self, v: int):
-        # Linear mapping 0..10000 -> s in millimeters (simple; can be tied to actual segment length)
         self.spin_sf_s.setValue(float(v))
         self.on_sf_change()
 
-    # File I/O
     def new_file(self):
         self.model = TrackModel()
         self.scene.model = self.model
