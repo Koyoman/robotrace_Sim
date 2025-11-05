@@ -1,3 +1,13 @@
+"""Robot Editor UI (PySide6)
+
+This module provides a simple, beginner-friendly graphical editor for a small robot.
+You can see the robot envelope (overall size), place the left/right wheels, and add
+square sensors on a grid. The editor lets you import/export a JSON robot definition,
+zoom/pan the view, and nudge sensors with the keyboard.
+
+The comments and docstrings in this file aim to explain each part in plain English
+so that someone new to Python/Qt can follow along.
+"""
 from __future__ import annotations
 import sys, json
 from typing import Optional, Tuple
@@ -19,10 +29,14 @@ from Utils.robot_model import RobotModel, Wheel, Sensor
 TAPE_THICKNESS_MM = 20.0
 
 class RobotScene(QGraphicsScene):
+    """QGraphicsScene that draws the robot, grid, and selection.
+Left-click selects items; right-click moves the origin.
+It emits signals when the selection or origin changes for the UI to update."""
     selChanged = Signal(object, object)
-    originMoved = Signal(float, float)  # new: notify UI when origin changes from the canvas
+    originMoved = Signal(float, float)
 
     def __init__(self, model: RobotModel):
+        """Set up the window, build the form controls, connect signals, and show the editor."""
         super().__init__()
         self.model = model
         self.setBackgroundBrush(QColor("#0c0c0c"))
@@ -32,6 +46,7 @@ class RobotScene(QGraphicsScene):
         self.selected_id: Optional[str] = None
 
     def mousePressEvent(self, event):
+        """Handle mouse clicks. Left-click selects wheels/sensors; right-click moves the origin (0,0)."""
         if event.button() == Qt.LeftButton:
             pos = event.scenePos()
             clicked = self._hit_test(pos)
@@ -52,7 +67,6 @@ class RobotScene(QGraphicsScene):
             self.model.originXMM = ox
             self.model.originYMM = oy
             self.model.clamp_all_inside()
-            # notify UI about new origin so spin boxes are updated
             self.originMoved.emit(self.model.originXMM, self.model.originYMM)
             self.selChanged.emit(None, None)
             self.rebuild()
@@ -73,6 +87,7 @@ class RobotScene(QGraphicsScene):
 
     # ---- render ----
     def drawBackground(self, painter: QPainter, rect):
+        """Draw a dark grid to help the user align parts."""
         super().drawBackground(painter, rect)
         step = max(5.0, self.model.gridStepMM)
         pen = QPen(QColor(25, 25, 25), 1)
@@ -88,6 +103,7 @@ class RobotScene(QGraphicsScene):
             y += step
 
     def rebuild(self):
+        """Repaint the entire scene: envelope, axes, tape line, origin crosshair, wheels, and sensors."""
         self.clear()
         c = self.center_scene
         halfW = self.model.envelope.widthMM / 2.0
@@ -101,8 +117,8 @@ class RobotScene(QGraphicsScene):
         self.addRect(c.x()-halfW, c.y()-halfH, self.model.envelope.widthMM, self.model.envelope.heightMM, env_pen, env_brush)
 
         axis_pen = QPen(QColor("#303030"), 1)
-        self.addLine(c.x()-halfW-60, c.y(), c.x()+halfW+60, c.y(), axis_pen)  # X axis
-        self.addLine(c.x(), c.y()-halfH-60, c.x(), c.y()+halfH+60, axis_pen)  # Y axis
+        self.addLine(c.x()-halfW-60, c.y(), c.x()+halfW+60, c.y(), axis_pen)
+        self.addLine(c.x(), c.y()-halfH-60, c.x(), c.y()+halfH+60, axis_pen)
 
         tape_pen = QPen(QColor("#2b2b2b"), TAPE_THICKNESS_MM, Qt.SolidLine, Qt.RoundCap)
         self.addLine(c.x()-halfW-200, c.y(), c.x()+halfW+200, c.y(), tape_pen)
@@ -140,6 +156,8 @@ class RobotScene(QGraphicsScene):
                 self.addRect(x-s.sizeMM/2.0, y-s.sizeMM/2.0, s.sizeMM, s.sizeMM, sel_pen)
 
 class RobotView(QGraphicsView):
+    """QGraphicsView wrapper that enables smooth zooming and panning
+        so the user can inspect the robot easily."""
     def __init__(self, scene: RobotScene):
         super().__init__(scene)
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -147,10 +165,13 @@ class RobotView(QGraphicsView):
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
 
     def wheelEvent(self, event):
+        """Zoom in/out with the mouse wheel so the user can inspect details."""
         factor = 1.15 if event.angleDelta().y() > 0 else 1/1.15
         self.scale(factor, factor)
 
 class MainWindow(QMainWindow):
+    """Main application window that assembles the scene, view, and
+        property panel. It wires up the buttons/spin boxes to the robot model."""
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Robot Editor (Python/PySide6)")
@@ -361,9 +382,8 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, self.on_fit)
 
-
-# ---------- helpers UI ----------
     def on_fit(self):
+        """Adjust the zoom so the whole robot fits nicely on screen."""
         halfW = self.model.envelope.widthMM/2.0
         halfH = self.model.envelope.heightMM/2.0
         c = self.scene.center_scene
@@ -371,6 +391,7 @@ class MainWindow(QMainWindow):
         self.view.fitInView(rect, Qt.KeepAspectRatio)
 
     def on_env_change(self):
+        """Apply new envelope size (width/height). Also refresh wheel/sensor panels and redraw."""
         self.model.set_envelope(self.spin_env_w.value(), self.spin_env_h.value())
         self.refresh_wheels_fields()
         self.refresh_sensors_list()
@@ -378,6 +399,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_grid_change(self):
+        """Apply a new grid spacing. Optionally snap sensor positions to the grid."""
         self.model.gridStepMM = self.spin_grid.value()
         if self.chk_snap.isChecked():
             self.on_sensor_change()
@@ -385,16 +407,16 @@ class MainWindow(QMainWindow):
 
     def on_scene_origin_moved(self, x: float, y: float):
         """Update Origin X/Y spin boxes when the origin is moved directly on the canvas."""
-        # Clamp already performed in scene; just reflect values on the editors without re-triggering loops
         self.spin_origin_x.blockSignals(True); self.spin_origin_y.blockSignals(True)
         self.spin_origin_x.setValue(x); self.spin_origin_y.setValue(y)
         self.spin_origin_x.blockSignals(False); self.spin_origin_y.blockSignals(False)
-        # Keep model consistent (in case of future changes to decouple)
+
         self.model.originXMM = x
         self.model.originYMM = y
         self.scene.rebuild()
 
     def on_origin_change(self):
+        """Apply new origin coordinates typed by the user, clamping to safe limits."""
         self.model.originXMM = self.spin_origin_x.value()
         self.model.originYMM = self.spin_origin_y.value()
         self.model.clamp_all_inside()
@@ -404,6 +426,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_origin_from_mid_wheels(self):
+        """Place the origin exactly at the midpoint between the two wheels."""
         wl = self.model.find_wheel("left")
         wr = self.model.find_wheel("right")
         if not wl or not wr:
@@ -419,6 +442,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_wheel_change(self):
+        """Save wheel positions from the spin boxes and redraw the scene."""
         wl = self.model.find_wheel("left")
         wr = self.model.find_wheel("right")
         if wl:
@@ -433,6 +457,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_add_sensor(self):
+        """Create a new sensor at the current X/Y fields (snaps to grid if enabled)."""
         x, y = self.spin_s_x.value(), self.spin_s_y.value()
         if self.chk_snap.isChecked():
             step = max(1e-6, self.model.gridStepMM)
@@ -445,6 +470,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_del_sensor(self):
+        """Delete the currently selected sensor from the list."""
         sid = self.current_sensor_id()
         if sid is None: return
         self.model.remove_sensor(sid)
@@ -453,6 +479,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_select_sensor(self, row: int):
+        """When the user selects a sensor in the list, reflect its coordinates in the fields."""
         sid = self.current_sensor_id()
         if sid is None:
             return
@@ -466,6 +493,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_sensor_change(self):
+        """Apply new sensor coordinates from the fields (with optional snapping and clamping)."""
         sid = self.current_sensor_id()
         if sid is None: return
         s = self.model.find_sensor(sid)
@@ -479,7 +507,6 @@ class MainWindow(QMainWindow):
         s.xMM = x
         s.yMM = y
         self.model.clamp_all_inside()
-        # Reflect clamped (and snapped) values
         self.spin_s_x.blockSignals(True); self.spin_s_y.blockSignals(True)
         self.spin_s_x.setValue(s.xMM); self.spin_s_y.setValue(s.yMM)
         self.spin_s_x.blockSignals(False); self.spin_s_y.blockSignals(False)
@@ -487,6 +514,7 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_scene_selection(self, kind: Optional[str], sid: Optional[str]):
+        """Keep the list/fields in sync when an item is selected directly on the canvas."""
         if kind == "sensor" and sid:
             self.select_sensor_id(sid)
         elif kind == "wheel" and sid:
@@ -496,6 +524,7 @@ class MainWindow(QMainWindow):
                 self.refresh_wheels_fields()
 
     def rename_sensor(self):
+        """Rename the selected sensor. Ensures IDs stay unique and tidy (e.g., S1, S2…)."""
         sid = self.current_sensor_id()
         if sid is None: return
         s = self.model.find_sensor(sid)
@@ -526,8 +555,8 @@ class MainWindow(QMainWindow):
         self.scene.selected_kind, self.scene.selected_id = "sensor", s.id
         self.scene.rebuild()
 
-    # ---------- keyboard nudge ----------
     def keyPressEvent(self, event: QKeyEvent):
+        """Allow nudging the selected sensor with arrow keys. Hold Shift/Ctrl/Alt for bigger/smaller steps."""
         handled = False
         sid = self.current_sensor_id()
         if sid is not None:
@@ -562,6 +591,7 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
 
     def on_import(self):
+        """Load a robot definition from a JSON file and refresh the UI."""
         path, _ = QFileDialog.getOpenFileName(self, "Import robot", "", "JSON (*.json)")
         if not path: return
         try:
@@ -576,6 +606,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to import:\n{e}")
 
     def on_export(self):
+        """Save the current robot definition to a JSON file."""
         path, _ = QFileDialog.getSaveFileName(self, "Export robot", "robot-spec.json", "JSON (*.json)")
         if not path: return
         try:
@@ -584,8 +615,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
 
-    # ---------- utils ----------
     def refresh_all(self):
+        """Refresh all form sections from the model (envelope, origin, wheels, sensors)."""
         self.spin_env_w.blockSignals(True); self.spin_env_h.blockSignals(True); self.spin_grid.blockSignals(True)
         self.spin_env_w.setValue(self.model.envelope.widthMM)
         self.spin_env_h.setValue(self.model.envelope.heightMM)
@@ -602,6 +633,7 @@ class MainWindow(QMainWindow):
         self.refresh_sensors_fields()
 
     def refresh_wheels_fields(self):
+        """Show the current wheel coordinates in the spin boxes."""
         wl = self.model.find_wheel("left")
         wr = self.model.find_wheel("right")
         self.spin_wl_x.blockSignals(True); self.spin_wl_y.blockSignals(True)
@@ -614,6 +646,7 @@ class MainWindow(QMainWindow):
         self.spin_wr_x.blockSignals(False); self.spin_wr_y.blockSignals(False)
 
     def refresh_sensors_list(self):
+        """Rebuild the sensor list with their IDs and coordinates."""
         cur_sid = self.current_sensor_id()
         self.list_sensors.blockSignals(True)
         self.list_sensors.clear()
@@ -622,13 +655,13 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, s.id)
             self.list_sensors.addItem(item)
         self.list_sensors.blockSignals(False)
-        # Restore selection if possible
         if cur_sid:
             self.select_sensor_id(cur_sid)
         elif self.model.sensors:
             self.list_sensors.setCurrentRow(0)
 
     def refresh_sensors_fields(self):
+        """Show the selected sensor coordinates in the X/Y fields (or zeros if none)."""
         sid = self.current_sensor_id()
         s = self.model.find_sensor(sid) if sid else None
         self.spin_s_x.blockSignals(True); self.spin_s_y.blockSignals(True)
@@ -639,6 +672,7 @@ class MainWindow(QMainWindow):
         self.spin_s_x.blockSignals(False); self.spin_s_y.blockSignals(False)
 
     def update_current_sensor_list_item_text(self):
+        """Update the text of the currently selected sensor list row."""
         row = self.list_sensors.currentRow()
         if 0 <= row < self.list_sensors.count():
             sid = self.list_sensors.item(row).data(Qt.UserRole)
@@ -651,6 +685,7 @@ class MainWindow(QMainWindow):
         return item.data(Qt.UserRole) if item else None
 
     def select_sensor_id(self, sid: str):
+        """Select a sensor by ID in the list and show its coordinates in the fields."""
         for i in range(self.list_sensors.count()):
             if self.list_sensors.item(i).data(Qt.UserRole) == sid:
                 self.list_sensors.setCurrentRow(i)
@@ -662,6 +697,7 @@ class MainWindow(QMainWindow):
                 break
 
 def main():
+    """Create the Qt application, show the main window, and start the event loop."""
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()

@@ -1,8 +1,15 @@
+"""Line-Follower Simulator (PySide6 + C backend)
+
+This module provides a minimal GUI to load a track, a robot, and a Python
+controller, then simulate the robot following the line. It uses a small C
+library (linesim.dll) for the heavy geometry/physics and draws results with Qt.
+
+Comments and docstrings are written in plain English to help beginners.
+"""
 from __future__ import annotations
 import os, sys, math, json, csv, ctypes, importlib.util, random, time, zlib
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Any, Optional
-from datetime import datetime
 
 from PySide6.QtCore import Qt, QPointF, QThread, Signal, QTimer, QElapsedTimer
 from PySide6.QtGui import QPen, QColor, QPainterPath, QPainter
@@ -16,6 +23,7 @@ from PySide6.QtWidgets import (
 from ctypes import c_double, c_int, POINTER
 
 class CPoint(ctypes.Structure):
+    """ctypes struct that holds a 2D point (x, y) in millimeters for the C API."""
     _fields_ = [("x", c_double), ("y", c_double)]
 
 _here = os.path.dirname(__file__)
@@ -89,11 +97,13 @@ WHEEL_BRUSH = QColor("#dddddd")
 
 @dataclass(slots=True)
 class Pt:
+    """Lightweight 2D point used by the Python code (millimeters)."""
     x: float
     y: float
 
 @dataclass(slots=True)
 class Pose:
+    """Robot pose with a point (x, y) and a heading in degrees."""
     p: Pt
     headingDeg: float
 
@@ -122,6 +132,7 @@ def advance_arc(pose: Pose, R: float, sweepDeg: float) -> Pose:
 
 @dataclass(slots=True)
 class SegStraight:
+    """Track straight segment starting at from_pose with a given length (mm)."""
     kind: str
     id: str
     lengthMM: float
@@ -129,6 +140,7 @@ class SegStraight:
 
 @dataclass(slots=True)
 class SegArc:
+    """Track circular arc segment starting at from_pose with radius (mm) and sweep (deg)."""
     kind: str
     id: str
     radiusMM: float
@@ -224,12 +236,6 @@ def ensure_track_raster(track_path: str, track_json: dict, segs: list, tapeW: fl
 
     buf = bytearray(W * H)
 
-    def set_px(wx: float, wy: float):
-        ix = int((wx - origin_x) // pixel_mm)
-        iy = int((wy - origin_y) // pixel_mm)
-        if 0 <= ix < W and 0 <= iy < H:
-            buf[iy*W + ix] = 255
-
     half = tapeW * 0.5
     if len(pts) >= 2:
         for i in range(len(pts) - 1):
@@ -245,7 +251,6 @@ def ensure_track_raster(track_path: str, track_json: dict, segs: list, tapeW: fl
                 wy = origin_y + (py + 0.5) * pixel_mm
                 for px in range(ix0, ix1+1):
                     wx = origin_x + (px + 0.5) * pixel_mm
-                    # distance point to segment
                     t = ((wx - x1)*dx + (wy - y1)*dy) / segL2
                     if t < 0.0:  qx, qy = x1, y1
                     elif t > 1.0: qx, qy = x2, y2
@@ -303,6 +308,7 @@ def curvature_change_markers(segs: List[object]) -> List[Tuple[Pt, float]]:
     return out
 
 def start_finish_lines(track: Dict[str, Any], segs: List[object], tapeW: float):
+    """Compute Start and Finish gate lines from the track definition (if enabled)."""
     sf = track.get("startFinish") or {}
     if not sf.get("enabled", False):
         return None
@@ -378,7 +384,9 @@ def save_sim_params(params: dict) -> None:
 
 
 class SimulationParamsDialog(QDialog):
+    """Small dialog to view/edit and persist simulation parameters to JSON."""
     def __init__(self, parent=None):
+        """Set up references, parameters, and optional logger for a simulation run."""
         super().__init__(parent)
         self.setWindowTitle("Simulation parameters")
         self.setModal(True)
@@ -469,17 +477,20 @@ class SimulationParamsDialog(QDialog):
 
 @dataclass(slots=True)
 class Envelope:
+    """Robot outer rectangle (width × height) used for collisions and drawing."""
     widthMM: float
     heightMM: float
 
 @dataclass(slots=True)
 class Wheel:
+    """Wheel definition with id and position in robot coordinates (mm)."""
     id: str
     xMM: float
     yMM: float
 
 @dataclass(slots=True)
 class Sensor:
+    """Square sensor definition with id, position, and size (mm)."""
     id: str
     xMM: float
     yMM: float
@@ -487,6 +498,7 @@ class Sensor:
 
 @dataclass(slots=True)
 class Robot:
+    """Robot model grouping envelope, wheels, sensors and grid/origin settings."""
     envelope: Envelope
     wheels: List[Wheel]
     sensors: List[Sensor]
@@ -545,6 +557,7 @@ def sensor_value_from_coverage(cov: float,
         return random.randint(lo, hi)
 
 def load_python_controller(path: str):
+    """Load a Python file and return its control_step(state) function."""
     spec = importlib.util.spec_from_file_location("controller_mod", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -554,11 +567,13 @@ def load_python_controller(path: str):
     return mod.control_step
 
 def import_controller(path: str):
+    """Dispatch loader by file extension. Currently only .py is supported."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".py": return load_python_controller(path)
     raise ValueError("Only .py is supported.")
 
 class SimLogger:
+    """Helper that records steps/events and writes CSV + JSON logs under Logs/."""
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         os.makedirs(os.path.join(base_dir, "Logs"), exist_ok=True)
@@ -609,6 +624,7 @@ class SimLogger:
             print("JSON log error:", e)
 
 class NoopLogger:
+    """Logger stub used when file logging is disabled."""
     def __init__(self):
         self.csv_path = ""
         self.json_path = ""
@@ -620,6 +636,7 @@ class NoopLogger:
         return
 
 class FinishZoneChecker:
+    """Detects valid Start→Finish crossing using a rectangular zone pair."""
     __slots__ = ('s_mid','f_mid','ux','uy','nx','ny','L','HALF_W','EPS','started_inside','last_inside','exited_once','entered_once','armed','last_event','_cross','_sa','_sb','_fa','_fb','_finish_cross_t_ms','_require_envelope_ms')
     def __init__(self, sa: Pt, sb: Pt, fa: Pt, fb: Pt, half_width=250.0, eps=3.0):
         self.s_mid = Pt((sa.x + sb.x)/2.0, (sa.y + sb.y)/2.0)
@@ -704,6 +721,7 @@ class FinishZoneChecker:
         return False
 
 def poly_area(poly):
+    """Compute polygon signed area magnitude using the shoelace formula."""
     if len(poly) < 3: return 0.0
     a = 0.0
     for i in range(len(poly)):
@@ -713,6 +731,7 @@ def poly_area(poly):
     return abs(a) * 0.5
 
 def suth_hodg_clip(subject, clip):
+    """Sutherland–Hodgman polygon clipping of *subject* by convex *clip* polygon."""
     def inside(p, a, b):
         return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0]) >= 0.0
     def intersect(p1, p2, a, b):
@@ -752,6 +771,7 @@ def point_in_obb(px: float, py: float,
     return (abs(t) <= halfL) and (abs(w) <= halfW)
 
 def oriented_rect(cx, cy, ux, uy, halfL, vx, vy, halfW):
+    """Return the 4 corners of an oriented rectangle as (x, y) tuples."""
     return [
         (cx - ux*halfL - vx*halfW, cy - uy*halfL - vy*halfW),
         (cx + ux*halfL - vx*halfW, cy + uy*halfL - vy*halfW),
@@ -760,10 +780,12 @@ def oriented_rect(cx, cy, ux, uy, halfL, vx, vy, halfW):
     ]
 
 def rect_rect_overlap_area(R1, R2):
+    """Compute overlap area between two rectangles by polygon clipping."""
     poly = suth_hodg_clip(R1, R2)
     return poly_area(poly)
 
 class SimWorker(QThread):
+    """Background thread that runs the physics loop and streams steps to the UI."""
     sig_chunk = Signal(list)
     sig_done  = Signal(dict)
     sig_fail  = Signal(str)
@@ -790,6 +812,7 @@ class SimWorker(QThread):
         self.track_path = track_path
 
     def _initial_pose(self):
+        """Choose the starting pose: behind the Start gate if available, otherwise the track origin."""
         segs = getattr(self, "_segs", None)
         origin = getattr(self, "_origin", None)
         tapeW = getattr(self, "_tapeW", None)
@@ -806,6 +829,7 @@ class SimWorker(QThread):
         return pos
 
     def _sensors_world_xy(self, x, y, h_deg):
+        """Return lists of sensor world coordinates (sx, sy) from robot pose and sensor local coordinates."""
         ang = math.radians(h_deg)
         ox, oy = self.robot.originXMM, self.robot.originYMM
         sx, sy = [], []
@@ -846,6 +870,7 @@ class SimWorker(QThread):
 
 
     def _estimate_coverage_batch(self, sx, sy, x, y, h_deg, tape_half, sensor_half_unused):
+        """Fallback to C function that estimates coverage along the polyline (if available)."""
         try:
             N = len(sx)
             xs = (c_double * N)(*sx)
@@ -868,16 +893,17 @@ class SimWorker(QThread):
             return [0.0 for _ in sx]
 
     def _apply_marker_overrides(self, sx, sy, base_cov):
-            if not self._markers_obb:
-                return base_cov
-            out = list(base_cov)
-            for i in range(len(sx)):
-                px, py = sx[i], sy[i]
-                for (mcx, mcy, mux, muy, mvx, mvy, mhalfL, mhalfW) in self._markers_obb:
-                    if point_in_obb(px, py, mcx, mcy, mux, muy, mhalfL, mvx, mvy, mhalfW):
-                        out[i] = 1.0
-                        break
-            return out
+        """Force coverage=1.0 when a sensor lies on a marker OBB (used for visualization cues)."""
+        if not self._markers_obb:
+            return base_cov
+        out = list(base_cov)
+        for i in range(len(sx)):
+            px, py = sx[i], sy[i]
+            for (mcx, mcy, mux, muy, mvx, mvy, mhalfL, mhalfW) in self._markers_obb:
+                if point_in_obb(px, py, mcx, mcy, mux, muy, mhalfL, mvx, mvy, mhalfW):
+                    out[i] = 1.0
+                    break
+        return out
 
     def envelope_contacts_tape(self, x, y, h_deg, tape_half_with_margin) -> bool:
         cx = x - self.robot.originXMM
@@ -895,6 +921,7 @@ class SimWorker(QThread):
         return bool(hit)
 
     def build_markers(self, segs, tapeW, gates):
+        """Build oriented rectangles (position and axes) used to draw/override curvature markers and gates."""
         rects = []
         halfL = MARKER_LENGTH_MM * 0.5
         halfW = MARKER_THICKNESS_MM * 0.5
@@ -925,6 +952,7 @@ class SimWorker(QThread):
         return rects
 
     def _prepare_track_geometry(self):
+        """Create C arrays for track polyline, precompute gates/markers, and optional raster cache."""
         segs, origin, tapeW = segments_from_json(self.track)
         pts = segments_polyline(segs, step=1.0)
         n = len(pts)
@@ -948,6 +976,7 @@ class SimWorker(QThread):
         return segs, origin, tapeW
 
     def run(self):
+        """Main simulation loop: query controller, integrate dynamics via C API, stream steps, and stop on finish/collision."""
         try:
             segs, origin, tapeW = self._prepare_track_geometry()
             tape_half = float(tapeW) * 0.5
@@ -1069,11 +1098,13 @@ class SimWorker(QThread):
                 pass
 
 class SimScene(QGraphicsScene):
+    """QGraphicsScene that draws the background grid and simulation items."""
     def __init__(self):
         super().__init__()
         self.setBackgroundBrush(QColor("#0c0c0c"))
 
     def drawBackground(self, painter: QPainter, rect):
+        """Draw a dark grid to help with spatial orientation (no heavy painting)."""
         super().drawBackground(painter, rect)
         step = 25.0
         pen = QPen(QColor(30, 30, 30), 1)
@@ -1086,6 +1117,7 @@ class SimScene(QGraphicsScene):
             painter.drawLine(rect.left(), y, rect.right(), y); y += step
 
 class SimView(QGraphicsView):
+    """QGraphicsView with smooth zoom/pan suitable for inspecting the scene."""
     def __init__(self, scene: SimScene):
         super().__init__(scene)
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -1095,11 +1127,13 @@ class SimView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
 
     def wheelEvent(self, e):
+        """Zoom in/out around the mouse position using the wheel delta; accept the event."""
         s = 1.15 if e.angleDelta().y() > 0 else 1/1.15
         self.scale(s, s)
         e.accept()
 
 class MainWindow(QMainWindow):
+    """Main GUI: loads files, starts simulation, and replays results."""
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Line-Follower Simulator")
@@ -1279,12 +1313,14 @@ class MainWindow(QMainWindow):
         self.is_replaying = False
 
     def update_replay_buttons(self):
+        """Enable/disable replay buttons depending on current state."""
         has_steps = bool(self.anim_steps)
         self.btn_replay.setEnabled(has_steps and not self.is_replaying and not self.streaming)
         self.btn_replay_stop.setEnabled(self.is_replaying)
         self._refresh_title()
 
     def on_open_params(self):
+        """Open the parameters dialog, then refresh spin boxes and window title."""
         dlg = SimulationParamsDialog(self)
         if dlg.exec() == QDialog.Accepted:
             p = load_sim_params()
@@ -1300,9 +1336,11 @@ class MainWindow(QMainWindow):
                 pass
 
     def _refresh_title(self):
+        """Show the current dt (ms) in the window title for quick reference."""
         self.setWindowTitle(f"Line-Follower Simulator (dt = {self.sim_dt_s*1000.0:.1f} ms)")
 
     def _draw_robot_at_initial_pose(self):
+        """Draw the robot body/wheels/sensors at the initial pose onto the scene."""
         if not (self.track and self.robot):
             return
         segs, origin, tapeW = segments_from_json(self.track)
@@ -1354,6 +1392,7 @@ class MainWindow(QMainWindow):
                 self.anim_items["wheels"][k].setPath(wp)
 
     def on_speed_change(self, idx: int):
+        """Map speed combo to playback speed and compute steps-per-frame for replay."""
         mapping = {0: 0.1, 1: 0.5, 2: 1.0, 3: 2.0, 4: 4.0}
         self.anim_speed = mapping.get(idx, 1.0)
         steps_per_sec = 1.0 / max(1e-6, self.sim_dt_s)
@@ -1362,6 +1401,7 @@ class MainWindow(QMainWindow):
         i = self.anim_idx if self.anim_steps else 0
 
     def on_load_track(self):
+        """Read a track JSON, build raster cache, and draw the static track."""
         path, _ = QFileDialog.getOpenFileName(self, "Track file", "", "JSON (*.json)")
         if not path: return
         with open(path, "r", encoding="utf-8") as f:
@@ -1380,6 +1420,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Track: {base}")
 
     def on_load_robot(self):
+        """Read a robot JSON and update preview widgets; show errors if parsing fails."""
         path, _ = QFileDialog.getOpenFileName(self, "Robot file", "", "JSON (*.json)")
         if not path: return
         try:
@@ -1410,6 +1451,7 @@ class MainWindow(QMainWindow):
                     pass
 
     def on_load_controller(self):
+        """Load a Python controller and update the status label with success/failure."""
         path, _ = QFileDialog.getOpenFileName(self, "Controller", "", "Python (*.py)")
         if not path:
             return
@@ -1434,10 +1476,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Controller load error", str(e))
 
     def clear_static(self):
+        """Remove all static scene items and forget cached QGraphicsPathItems."""
         self.scene.clear()
         self.anim_items.clear()
 
     def draw_static_track(self):
+        """Add the tape polyline and markers to the scene for a loaded track."""
         if not self.track: return
         self.clear_static()
         segs, origin, tapeW = segments_from_json(self.track)
