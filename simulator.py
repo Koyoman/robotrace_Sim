@@ -1588,7 +1588,6 @@ class MainWindow(QMainWindow):
                 return
             self._last_stream_draw_ns = now_ns
 
-
         if self._replay_elapsed is None:
             self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
         elapsed_s = self._replay_elapsed.restart() / 1000.0
@@ -1596,74 +1595,73 @@ class MainWindow(QMainWindow):
         self._sim_time_acc_s += elapsed_s * self.anim_speed
         target_ms = self._sim_time_acc_s * 1000.0
 
-        MAX_ADV = 500
-        adv = 0
-        while self.anim_idx < len(self.anim_steps) and adv < MAX_ADV:
-            step = self.anim_steps[self.anim_idx]
-            step_ms = float(step.get("t_ms", self.anim_idx * self.sim_dt_s * 1000.0))
+        new_idx = self.anim_idx
+        n_steps = len(self.anim_steps)
+        while new_idx < n_steps:
+            step_ms = float(self.anim_steps[new_idx].get("t_ms", new_idx * self.sim_dt_s * 1000.0))
             if step_ms > target_ms:
                 break
-            x = float(step.get("x_mm", 0.0))
-            y = float(step.get("y_mm", 0.0))
-            h = float(step.get("heading_deg", 0.0))
+            new_idx += 1
 
-            v_now = float(step.get("v_mm_s", 0.0))
+        if new_idx == self.anim_idx:
+            return
 
-            if self.anim_idx == 0:
-                self._trail_last_pt = None
+        step = self.anim_steps[new_idx - 1]
+        x = float(step.get("x_mm", 0.0))
+        y = float(step.get("y_mm", 0.0))
+        h = float(step.get("heading_deg", 0.0))
+        v_now = float(step.get("v_mm_s", 0.0))
+        ang = rad(h)
 
-            if self._trail_last_pt is None:
-                self._trail_last_pt = (x, y)
-            else:
-                (px, py) = self._trail_last_pt
-                pen = QPen(self._speed_color(v_now), 2, Qt.SolidLine, Qt.RoundCap)
-                seg = self.scene.addLine(px, py, x, y, pen)
-                self.anim_items.setdefault("trail_items", []).append(seg)
-                self._trail_last_pt = (x, y)
+        if self._trail_last_pt is None:
+            self._trail_last_pt = (x, y)
+        else:
+            (px, py) = self._trail_last_pt
+            pen = QPen(self._speed_color(v_now), 2, Qt.SolidLine, Qt.RoundCap)
+            seg = self.scene.addLine(px, py, x, y, pen)
+            self.anim_items.setdefault("trail_items", []).append(seg)
+            self._trail_last_pt = (x, y)
 
-            if self.robot:
-                hw = self.robot.envelope.widthMM / 2.0
-                hh = self.robot.envelope.heightMM / 2.0
-                ang = rad(h)
-                ox, oy = self.robot.originXMM, self.robot.originYMM
-                corners = [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]
-                poly = QPainterPath()
-                for k,(cx,cy) in enumerate(corners + [corners[0]]):
-                    lx, ly = cx - ox, cy - oy
-                    rx, ry = rot(lx, ly, ang)
-                    px, py = x + rx, y + ry
-                    poly.moveTo(px, py) if k == 0 else poly.lineTo(px, py)
-                self.anim_items["robot"].setPath(poly)
+        if self.robot:
+            hw = self.robot.envelope.widthMM / 2.0
+            hh = self.robot.envelope.heightMM / 2.0
+            ox, oy = self.robot.originXMM, self.robot.originYMM
+            corners = [(-hw,-hh),(hw,-hh),(hw,hh),(-hw,hh)]
+            poly = QPainterPath()
+            for k,(cx,cy) in enumerate(corners + [corners[0]]):
+                lx, ly = cx - ox, cy - oy
+                rx, ry = rot(lx, ly, ang)
+                px, py = x + rx, y + ry
+                poly.moveTo(px, py) if k == 0 else poly.lineTo(px, py)
+            self.anim_items["robot"].setPath(poly)
 
-                for k, s in enumerate(self.robot.sensors):
-                    px, py = s.xMM - self.robot.originXMM, s.yMM - self.robot.originYMM
-                    rx, ry = rot(px, py, ang)
-                    cx, cy = x + rx, y + ry
-                    sp = QPainterPath()
-                    sp.addRect(cx - 2, cy - 2, 4, 4)
-                    if k < len(self.anim_items["sensors"]):
-                        self.anim_items["sensors"][k].setPath(sp)
+            for k, s in enumerate(self.robot.sensors):
+                px, py = s.xMM - self.robot.originXMM, s.yMM - self.robot.originYMM
+                rx, ry = rot(px, py, ang)
+                cx, cy = x + rx, y + ry
+                r = s.sizeMM / 2.0
+                sp = QPainterPath(); sp.addEllipse(cx - r, cy - r, 2*r, 2*r)
+                if k < len(self.anim_items["sensors"]):
+                    self.anim_items["sensors"][k].setPath(sp)
 
-                half_w = WHEEL_W_MM * 0.5
-                half_h = WHEEL_H_MM * 0.5
-                for k, wdef in enumerate(self.robot.wheels):
-                    px, py = wdef.xMM - self.robot.originXMM, wdef.yMM - self.robot.originYMM
-                    rx, ry = rot(px, py, ang)
-                    cx, cy = x + rx, y + ry
-                    corners = [(-half_w, -half_h), ( half_w, -half_h),
-                            ( half_w,  half_h), (-half_w,  half_h)]
-                    wp = QPainterPath()
-                    for i, (lx, ly) in enumerate(corners + [corners[0]]):
-                        rlx, rly = rot(lx, ly, ang)
-                        vx, vy = cx + rlx, cy + rly
-                        if i == 0: wp.moveTo(vx, vy)
-                        else:      wp.lineTo(vx, vy)
-                    if k < len(self.anim_items["wheels"]):
-                        self.anim_items["wheels"][k].setPath(wp)
+            half_w = WHEEL_W_MM * 0.5
+            half_h = WHEEL_H_MM * 0.5
+            for k, wdef in enumerate(self.robot.wheels):
+                px, py = wdef.xMM - self.robot.originXMM, wdef.yMM - self.robot.originYMM
+                rx, ry = rot(px, py, ang)
+                cx, cy = x + rx, y + ry
+                corners = [(-half_w, -half_h), ( half_w, -half_h),
+                           ( half_w,  half_h), (-half_w,  half_h)]
+                wp = QPainterPath()
+                for i, (lx, ly) in enumerate(corners + [corners[0]]):
+                    rlx, rly = rot(lx, ly, ang)
+                    vx, vy = cx + rlx, cy + rly
+                    if i == 0: wp.moveTo(vx, vy)
+                    else:      wp.lineTo(vx, vy)
+                if k < len(self.anim_items["wheels"]):
+                    self.anim_items["wheels"][k].setPath(wp)
 
-            self.anim_idx += 1
-            adv += 1
-
+        self.anim_idx = new_idx
         if self.anim_idx >= len(self.anim_steps):
             self.timer.stop()
             return
