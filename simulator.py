@@ -1266,8 +1266,7 @@ class MainWindow(QMainWindow):
         self._replay_elapsed.start()
         self._sim_time_acc_s = 0.0
         self.anim_idx = 0
-        self.timer.start(self.anim_interval_ms)
-        self.is_replaying = True
+        self.is_replaying = False
         self.update_replay_buttons()
         self.btn_replay.setEnabled(False)
         self.btn_replay_stop.setEnabled(False)
@@ -1567,6 +1566,7 @@ class MainWindow(QMainWindow):
             self.anim_items["wheels"].append(item)
 
     def on_simulate(self):
+        self.streaming = True
         if not (self.track and self.robot):
             self.streaming = True
             QMessageBox.warning(self, "Missing data", "Load a track and a robot.")
@@ -1641,13 +1641,14 @@ class MainWindow(QMainWindow):
         self.anim_steps.extend(chunk)
         self.step_count += len(chunk)
         self.lbl_progress.setText(f"Executed steps: {self.step_count}")
-        if not self.timer.isActive():
-            self._sim_time_acc_s = 0.0 if self.anim_idx == 0 else self.anim_idx * self.sim_dt_s
-            if self._replay_elapsed is None:
-                self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
-            else:
-                self._replay_elapsed.restart()
-            self.timer.start(self.anim_interval_ms)
+        if not getattr(self, 'streaming', False):
+            if not self.timer.isActive():
+                self._sim_time_acc_s = 0.0 if self.anim_idx == 0 else self.anim_idx * self.sim_dt_s
+                if self._replay_elapsed is None:
+                    self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
+                else:
+                    self._replay_elapsed.restart()
+                self.timer.start(self.anim_interval_ms)
         self.is_replaying = False
         self.update_replay_buttons()
 
@@ -1757,15 +1758,11 @@ class MainWindow(QMainWindow):
             self.timer.stop()
             return
 
+        if getattr(self, 'streaming', False):
+            return
+
         if ("trail_items" not in self.anim_items) or ("robot" not in self.anim_items):
             self.reset_anim_items()
-        if getattr(self, 'streaming', False):
-            now_ns = time.monotonic_ns()
-            interval_ns = int(getattr(self, 'stream_draw_interval_ms', 200)) * 1_000_000
-            last_ns = getattr(self, '_last_stream_draw_ns', 0)
-            if last_ns and (now_ns - last_ns) < interval_ns:
-                return
-            self._last_stream_draw_ns = now_ns
 
         if self._replay_elapsed is None:
             self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
@@ -1796,7 +1793,7 @@ class MainWindow(QMainWindow):
             self._trail_last_pt = (x, y)
         else:
             (px, py) = self._trail_last_pt
-            pen = QPen(self._speed_color(v_now), 2, Qt.SolidLine, Qt.RoundCap)
+            pen = QPen(self._speed_color(v_now), 8, Qt.SolidLine, Qt.RoundCap)
             seg = self.scene.addLine(px, py, x, y, pen)
             self.anim_items.setdefault("trail_items", []).append(seg)
             self._trail_last_pt = (x, y)
