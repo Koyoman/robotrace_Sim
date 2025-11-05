@@ -62,12 +62,12 @@ WHEEL_H_MM = 15.0
 WHEEL_PEN   = QPen(QColor("#000000"), 1)
 WHEEL_BRUSH = QColor("#dddddd")
 
-@dataclass
+@dataclass(slots=True)
 class Pt:
     x: float
     y: float
 
-@dataclass
+@dataclass(slots=True)
 class Pose:
     p: Pt
     headingDeg: float
@@ -95,14 +95,14 @@ def advance_arc(pose: Pose, R: float, sweepDeg: float) -> Pose:
     y = cy + R * math.sin(phi1)
     return Pose(Pt(x, y), pose.headingDeg + sweepDeg)
 
-@dataclass
+@dataclass(slots=True)
 class SegStraight:
     kind: str
     id: str
     lengthMM: float
     from_pose: Pose
 
-@dataclass
+@dataclass(slots=True)
 class SegArc:
     kind: str
     id: str
@@ -336,25 +336,25 @@ class SimulationParamsDialog(QDialog):
         save_sim_params(data)
         self.accept()
 
-@dataclass
+@dataclass(slots=True)
 class Envelope:
     widthMM: float
     heightMM: float
 
-@dataclass
+@dataclass(slots=True)
 class Wheel:
     id: str
     xMM: float
     yMM: float
 
-@dataclass
+@dataclass(slots=True)
 class Sensor:
     id: str
     xMM: float
     yMM: float
     sizeMM: float = 5.0
 
-@dataclass
+@dataclass(slots=True)
 class Robot:
     envelope: Envelope
     wheels: List[Wheel]
@@ -489,6 +489,7 @@ class NoopLogger:
         return
 
 class FinishZoneChecker:
+    __slots__ = ('s_mid','f_mid','ux','uy','nx','ny','L','HALF_W','EPS','started_inside','last_inside','exited_once','entered_once','armed','last_event','_cross','_sa','_sb','_fa','_fb','_finish_cross_t_ms','_require_envelope_ms')
     def __init__(self, sa: Pt, sb: Pt, fa: Pt, fb: Pt, half_width=250.0, eps=3.0):
         self.s_mid = Pt((sa.x + sb.x)/2.0, (sa.y + sb.y)/2.0)
         self.f_mid = Pt((fa.x + fb.x)/2.0, (fa.y + fb.y)/2.0)
@@ -939,6 +940,8 @@ class MainWindow(QMainWindow):
         controls = QWidget(); form = QFormLayout(controls)
 
         self.anim_interval_ms = 42
+        self.stream_draw_interval_ms = 200
+        self._last_stream_draw_ns = 0
         self.streaming = False
 
         self.anim_speed = 1.0
@@ -1439,6 +1442,7 @@ class MainWindow(QMainWindow):
 
     def on_stop(self):
         self.streaming = False
+        self._last_stream_draw_ns = 0
         if self.timer.isActive():
             self.timer.stop()
         if self.worker and self.worker.isRunning():
@@ -1469,6 +1473,7 @@ class MainWindow(QMainWindow):
         self.update_replay_buttons()
 
     def on_stream_done(self, info: dict):
+        self._last_stream_draw_ns = 0
         self.streaming = False
         if self.worker and self.worker.isRunning():
             self.worker.wait(2000)
@@ -1531,6 +1536,7 @@ class MainWindow(QMainWindow):
                 self.anim_items["wheels"].append(item)
 
     def on_replay(self):
+        self._last_stream_draw_ns = 0
         if not self.anim_steps:
             return
         self.reset_anim_items()
@@ -1574,6 +1580,14 @@ class MainWindow(QMainWindow):
 
         if ("trail_items" not in self.anim_items) or ("robot" not in self.anim_items):
             self.reset_anim_items()
+        if getattr(self, 'streaming', False):
+            now_ns = time.monotonic_ns()
+            interval_ns = int(getattr(self, 'stream_draw_interval_ms', 200)) * 1_000_000
+            last_ns = getattr(self, '_last_stream_draw_ns', 0)
+            if last_ns and (now_ns - last_ns) < interval_ns:
+                return
+            self._last_stream_draw_ns = now_ns
+
 
         if self._replay_elapsed is None:
             self._replay_elapsed = QElapsedTimer(); self._replay_elapsed.start()
