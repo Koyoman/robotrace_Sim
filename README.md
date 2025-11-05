@@ -6,7 +6,7 @@
 
 <p align="center">
   <!-- GIF #1 — Simulator (Hero position) -->
-  <img src="docs/media/01-simulator.gif" alt="RobotraceSim — Simulator running a lap" width="900">
+  <img src="docs/media/01.1-simulator.gif" alt="RobotraceSim — Simulator running a lap" width="900">
 </p>
 
 <p align="center">
@@ -42,7 +42,7 @@ Design precise line-following tracks with straights and arcs, set **Start/Finish
 
 <p align="center">
   <!-- GIF #2 — Track Editor (inside Track Editor section) -->
-  <img src="docs/media/02-track-editor.gif" alt="RobotraceSim — Track Editor walkthrough" width="900">
+  <img src="docs/media/02.1-track-editor.gif" alt="RobotraceSim — Track Editor walkthrough" width="900">
 </p>
 
 ---
@@ -59,7 +59,7 @@ Configure the robot footprint, wheelbase, and sensor array to rapidly iterate on
 
 <p align="center">
   <!-- GIF #3 — Robot Editor (inside Robot Editor section) -->
-  <img src="docs/media/03-robot-editor.gif" alt="RobotraceSim — Robot Editor walkthrough" width="900">
+  <img src="docs/media/03.1-robot-editor.gif" alt="RobotraceSim — Robot Editor walkthrough" width="900">
 </p>
 
 ---
