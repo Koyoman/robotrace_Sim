@@ -636,7 +636,7 @@ class SimWorker(QThread):
 
         self.v_final = float(params.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.tau     = max(0.001, min(0.100, float(params.get("motor_time_constant_s", 0.01))))
-        self.dt_s    = max(0.0005, min(0.1,  float(params.get("simulation_step_dt_ms", 1.0))) / 1000.0)
+        self.dt_s    = max(0.0005, min(0.1,  float(params.get("simulation_step_dt_ms", 1.0)) / 1000.0))
 
         self.sensor_mode      = params.get("sensor_mode", "analog")
         self.value_of_line    = int(params.get("value_of_line", 255))
@@ -1580,20 +1580,18 @@ class MainWindow(QMainWindow):
         elapsed_s = self._replay_elapsed.restart() / 1000.0
 
         self._sim_time_acc_s += elapsed_s * self.anim_speed
+        target_ms = self._sim_time_acc_s * 1000.0
 
-        target_idx = int(round(self._sim_time_acc_s / self.sim_dt_s))
-        steps_to_advance = max(0, min(target_idx - self.anim_idx, 500))
-
-        for _ in range(steps_to_advance):
-            if self.anim_idx >= len(self.anim_steps):
-                self.timer.stop(); return
+        MAX_ADV = 500
+        adv = 0
+        while self.anim_idx < len(self.anim_steps) and adv < MAX_ADV:
             step = self.anim_steps[self.anim_idx]
+            step_ms = float(step.get("t_ms", self.anim_idx * self.sim_dt_s * 1000.0))
+            if step_ms > target_ms:
+                break
             x = float(step.get("x_mm", 0.0))
             y = float(step.get("y_mm", 0.0))
             h = float(step.get("heading_deg", 0.0))
-
-            sim_t_s = self.anim_idx * self.sim_dt_s
-            self.lbl_time.setText(f"Sim time: {sim_t_s:.2f} s")
 
             v_now = float(step.get("v_mm_s", 0.0))
 
@@ -1639,7 +1637,7 @@ class MainWindow(QMainWindow):
                     rx, ry = rot(px, py, ang)
                     cx, cy = x + rx, y + ry
                     corners = [(-half_w, -half_h), ( half_w, -half_h),
-                               ( half_w,  half_h), (-half_w,  half_h)]
+                            ( half_w,  half_h), (-half_w,  half_h)]
                     wp = QPainterPath()
                     for i, (lx, ly) in enumerate(corners + [corners[0]]):
                         rlx, rly = rot(lx, ly, ang)
@@ -1650,9 +1648,14 @@ class MainWindow(QMainWindow):
                         self.anim_items["wheels"][k].setPath(wp)
 
             self.anim_idx += 1
+            adv += 1
 
-        sim_t_s = (self.anim_idx * self.sim_dt_s)
-        self.lbl_time.setText("Sim time: {:.2f} s".format(sim_t_s, self.anim_speed))
+        if self.anim_idx >= len(self.anim_steps):
+            self.timer.stop()
+            return
+
+        last_ms = float(self.anim_steps[self.anim_idx-1].get("t_ms", (self.anim_idx-1)*self.sim_dt_s*1000.0))
+        self.lbl_time.setText(f"Sim time: {last_ms/1000.0:.2f} s")
 
 def main():
     app = QApplication(sys.argv)
