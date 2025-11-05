@@ -10,10 +10,9 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
     QFileDialog, QDoubleSpinBox, QLabel, QSplitter, QGraphicsView,
     QGraphicsScene, QMessageBox, QComboBox, QCheckBox, QDialog,
-    QDialogButtonBox, QVBoxLayout, QHBoxLayout, QSpinBox
+    QDialogButtonBox, QVBoxLayout, QHBoxLayout, QSpinBox, QSizePolicy
 )
 
-# ---------- Native bindings (linesim) ----------
 from ctypes import c_double, c_int, POINTER
 
 class CPoint(ctypes.Structure):
@@ -41,7 +40,6 @@ _linesim.estimate_sensor_coverage_C.argtypes = [
 ]
 _linesim.estimate_sensor_coverage_C.restype = c_double
 
-# Batch sensor coverage
 _linesim.estimate_sensors_coverage_batch_C = getattr(_linesim, "estimate_sensors_coverage_batch_C")
 _linesim.estimate_sensors_coverage_batch_C.argtypes = [
     POINTER(c_double), POINTER(c_double), c_int,
@@ -59,13 +57,11 @@ _linesim.crossed_finish_C.argtypes = [
 ]
 _linesim.crossed_finish_C.restype = c_int
 
-# Wheel visuals to match robot_editor
 WHEEL_W_MM = 22.0
 WHEEL_H_MM = 15.0
 WHEEL_PEN   = QPen(QColor("#000000"), 1)
 WHEEL_BRUSH = QColor("#dddddd")
 
-# ---------- Geometry / track helpers ----------
 @dataclass
 class Pt:
     x: float
@@ -148,7 +144,6 @@ def segments_polyline(segs: List[object], step: float = 1.0) -> List[Pt]:
                 pts.append(Pt(p.x, p.y))
     return pts
 
-# Drawing constants
 START_FINISH_GAP_MM = 1000.0
 STRAIGHT_NEAR_XING_MM = 250.0
 MARKER_OFFSET_MM = 40.0
@@ -215,7 +210,6 @@ def start_finish_lines(track: Dict[str, Any], segs: List[object], tapeW: float):
     finish_pose = gate_at(max(0.0, sParam - START_FINISH_GAP_MM))
     return (start_pose, finish_pose) if startIsFwd else (finish_pose, start_pose)
 
-# ---------- Simulation Parmaeters ----------
 PARAMS_JSON_PATH = os.path.join(_here, "simulation_parameters.json")
 
 DEFAULT_SIM_PARAMS = {
@@ -282,7 +276,7 @@ class SimulationParamsDialog(QDialog):
         root.addLayout(row2)
 
         row3 = QHBoxLayout()
-        lbl3 = QLabel("Integration step dt (ms)")
+        lbl3 = QLabel("Simulation step dt (ms)")
         self.ed_dt = QDoubleSpinBox()
         self.ed_dt.setRange(0.5, 100.0)
         self.ed_dt.setDecimals(1)
@@ -342,7 +336,6 @@ class SimulationParamsDialog(QDialog):
         save_sim_params(data)
         self.accept()
 
-# ---------- Robot ----------
 @dataclass
 class Envelope:
     widthMM: float
@@ -393,8 +386,6 @@ def robot_from_json(obj: Dict[str, Any]) -> Robot:
         ox, oy
     )
 
-# ---------- Sensor utility (8-bit two-range with noise) ----------
-# ---------- Sensor utility (driven by JSON) ----------
 def sensor_value_from_coverage(cov: float,
                                sensor_mode: str,
                                value_of_line: int,
@@ -412,7 +403,6 @@ def sensor_value_from_coverage(cov: float,
         base = v_line if is_line else v_table
         return base
 
-    # analog
     base = v_line if is_line else v_table
     if is_line:
         hi = base
@@ -423,12 +413,11 @@ def sensor_value_from_coverage(cov: float,
         hi = min(1023, base + amp)
         return random.randint(lo, hi)
 
-# ---------- Controller loading ----------
 def load_python_controller(path: str):
     spec = importlib.util.spec_from_file_location("controller_mod", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    spec.loader.exec_module(mod)  # type: ignore
+    spec.loader.exec_module(mod)
     if not hasattr(mod, "control_step"):
         raise ValueError("Python controller must define control_step(state)->{'pwm_left','pwm_right'}.")
     return mod.control_step
@@ -438,9 +427,7 @@ def import_controller(path: str):
     if ext == ".py": return load_python_controller(path)
     raise ValueError("Only .py is supported.")
 
-# ---------- Simulation logger (CSV + JSON) ----------
 class SimLogger:
-    """Stores steps and events under Logs/sim_log_*.csv and Logs/sim_log_*.json."""
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         os.makedirs(os.path.join(base_dir, "Logs"), exist_ok=True)
@@ -466,7 +453,6 @@ class SimLogger:
         self.events.append(ev)
 
     def flush(self) -> None:
-        # CSV (steps only, with sensor columns)
         try:
             with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
@@ -485,7 +471,6 @@ class SimLogger:
         except Exception as e:
             print("CSV log error:", e)
 
-        # JSON (steps + events)
         try:
             with open(self.json_path, "w", encoding="utf-8") as f:
                 json.dump({"steps": self.steps, "events": self.events}, f, indent=2, ensure_ascii=False)
@@ -493,25 +478,17 @@ class SimLogger:
             print("JSON log error:", e)
 
 class NoopLogger:
-    """No-op logger used when 'Save logs to file' is disabled."""
     def __init__(self):
         self.csv_path = ""
         self.json_path = ""
-    def log_step(self, *args, **kwargs):  # noqa: D401
+    def log_step(self, *args, **kwargs):
         return
-    def log_event(self, *args, **kwargs):  # noqa: D401
+    def log_event(self, *args, **kwargs):
         return
-    def flush(self):  # noqa: D401
+    def flush(self):
         return
 
-# ---------- Finish zone checker ----------
 class FinishZoneChecker:
-    """
-    Robust FSM to end the run:
-      • If started INSIDE: must exit once, then arm on START crossing.
-      • If started OUTSIDE: must enter once, then arm on START crossing.
-      • Finish when re-entering the zone (armed).
-    """
     def __init__(self, sa: Pt, sb: Pt, fa: Pt, fb: Pt, half_width=250.0, eps=3.0):
         self.s_mid = Pt((sa.x + sb.x)/2.0, (sa.y + sb.y)/2.0)
         self.f_mid = Pt((fa.x + fb.x)/2.0, (fa.y + fb.y)/2.0)
@@ -594,7 +571,6 @@ class FinishZoneChecker:
         self.last_inside = inside_now
         return False
 
-# ---------- Convex polygon utils (rect/rect overlap) ----------
 def poly_area(poly):
     if len(poly) < 3: return 0.0
     a = 0.0
@@ -605,7 +581,6 @@ def poly_area(poly):
     return abs(a) * 0.5
 
 def suth_hodg_clip(subject, clip):
-    """Convex polygon intersection (Sutherland–Hodgman)."""
     def inside(p, a, b):
         return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0]) >= 0.0
     def intersect(p1, p2, a, b):
@@ -635,7 +610,6 @@ def suth_hodg_clip(subject, clip):
     return output
 
 def oriented_rect(cx, cy, ux, uy, halfL, vx, vy, halfW):
-    """Axis-aligned rectangle in local (u,v) axes, returned as 4 points (clockwise)."""
     return [
         (cx - ux*halfL - vx*halfW, cy - uy*halfL - vy*halfW),
         (cx + ux*halfL - vx*halfW, cy + uy*halfL - vy*halfW),
@@ -647,7 +621,6 @@ def rect_rect_overlap_area(R1, R2):
     poly = suth_hodg_clip(R1, R2)
     return poly_area(poly)
 
-# ---------- Simulation worker thread ----------
 class SimWorker(QThread):
     sig_chunk = Signal(list)
     sig_done  = Signal(dict)
@@ -661,7 +634,7 @@ class SimWorker(QThread):
         self.controller_fn = controller_fn
         self.cancelled = False
 
-        self.v_final = float(params.get("final_linear_speed_mps", 2.0)) * 1000.0  # mm/s @ PWM=4095
+        self.v_final = float(params.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.tau     = max(0.001, min(0.100, float(params.get("motor_time_constant_s", 0.01))))
         self.dt_s    = max(0.0005, min(0.1,  float(params.get("simulation_step_dt_ms", 1.0))) / 1000.0)
 
@@ -670,12 +643,10 @@ class SimWorker(QThread):
         self.value_of_background   = int(params.get("value_of_background", 0))
         self.analog_variation = int(params.get("analog_variation", 50))
 
-        # Select logger (file logger or no-op)
         self.logger = SimLogger(base_dir=_here) if save_logs else NoopLogger()
         self._marker_logged = False
 
     def envelope_contacts_tape(self, x, y, h_deg, tape_half_with_margin) -> bool:
-        # Convert robot ORIGIN pose to envelope CENTER pose expected by C library
         cx = x - self.robot.originXMM
         cy = y - self.robot.originYMM
         hit = _linesim.envelope_contacts_tape_C(
@@ -690,16 +661,14 @@ class SimWorker(QThread):
         return bool(hit)
 
     def build_markers(self, segs, tapeW, gates):
-        """Return a list of rectangles (each as 4 points) for curvature and start/finish markers."""
         rects = []
         halfL = MARKER_LENGTH_MM * 0.5
         halfW = MARKER_THICKNESS_MM * 0.5
 
-        # Curvature-change markers on the LEFT
         for (pp, hdg) in curvature_change_markers(segs):
             a = math.radians(hdg)
-            tx, ty = math.cos(a), math.sin(a)      # tangent
-            nx, ny = math.sin(a), -math.cos(a)     # left normal
+            tx, ty = math.cos(a), math.sin(a)
+            nx, ny = math.sin(a), -math.cos(a)
             base = (tapeW*0.5) + MARKER_OFFSET_MM
             cx, cy = pp.x + nx*base, pp.y + ny*base
             rects.append(oriented_rect(cx, cy, nx, ny, halfL, tx, ty, halfW))
@@ -716,14 +685,13 @@ class SimWorker(QThread):
                 cx, cy = mx + nx*base, my + ny*base
                 rects.append(oriented_rect(cx, cy, nx, ny, halfL, tx, ty, halfW))
 
-            add_right_rect(sa, sb, shdg_base)  # START
-            add_right_rect(fa, fb, fhdg_base)  # FINISH
+            add_right_rect(sa, sb, shdg_base)
+            add_right_rect(fa, fb, fhdg_base)
 
         return rects
 
     def run(self):
         try:
-            # Track
             segs, origin, tapeW = segments_from_json(self.track)
             poly = segments_polyline(segs, step=0.5)
             _poly_arr = (CPoint * len(poly))(*(CPoint(p.x, p.y) for p in poly))
@@ -732,11 +700,9 @@ class SimWorker(QThread):
             self._poly_ptr = _poly_ptr
             self._poly_n   = _poly_n
 
-            # Start/Finish
             gates = start_finish_lines(self.track, segs, tapeW)
             start_gate, finish_gate = (None, None) if (gates is None) else gates
 
-            # Initial pose (behind START if available)
             if start_gate is None:
                 x, y, h = origin.p.x, origin.p.y, origin.headingDeg
                 sa = sb = None
@@ -747,14 +713,12 @@ class SimWorker(QThread):
                 start_pose = advance_straight(pose, -back)
                 x, y, h = start_pose.p.x, start_pose.p.y, start_pose.headingDeg
 
-            # Finish zone checker
             zone_checker: Optional[FinishZoneChecker] = None
             if start_gate is not None and finish_gate is not None:
                 (fa, fb, _, _) = finish_gate
                 zone_checker = FinishZoneChecker(sa, sb, fa, fb, half_width=400.0, eps=5.0)
                 zone_checker.prime(x, y)
 
-            # States
             dt = self.dt_s
             vL = vR = v = w = 0.0
             prev_v = prev_w = 0.0
@@ -767,7 +731,6 @@ class SimWorker(QThread):
                 pwm = max(-4095, min(4095, int(pwm)))
                 return (pwm/4095.0) * self.v_final
 
-            # Sensor buffers (batch)
             nS = len(self.robot.sensors)
             sens_px = (c_double * nS)()
             sens_py = (c_double * nS)()
@@ -776,20 +739,17 @@ class SimWorker(QThread):
 
             steps_out: List[Dict[str, Any]] = []
             CHUNK_STEPS = 100
-            MAX_MS = 300000  # stop after ~5 minutes of simulated time
+            MAX_MS = 300000
             reason = "timeout"
 
             random.seed(datetime.now().timestamp())
 
-            # Log start
             self.logger.log_event("init", 0, x, y, h, {"note": "simulation started"})
 
-            # Markers (curvature + start/finish small ticks)
             markers = self.build_markers(segs, tapeW, gates)
 
             enter_t_ms = None
 
-            # Time accumulator (supports arbitrary dt)
             t_s = 0.0
             t_ms = 0
 
@@ -799,7 +759,6 @@ class SimWorker(QThread):
                     self.logger.log_event("user_stop", t_ms, x, y, h, {})
                     break
 
-                # Sensor world positions
                 a = math.radians(h)
                 ca, sa_ = math.cos(a), math.sin(a)
                 for i, s in enumerate(self.robot.sensors):
@@ -808,7 +767,6 @@ class SimWorker(QThread):
                     sens_px[i] = x + rx
                     sens_py[i] = y + ry
 
-                # Line coverage from DLL (tape only)
                 _linesim.estimate_sensors_coverage_batch_C(
                     sens_px, sens_py, nS,
                     _poly_ptr, _poly_n,
@@ -817,22 +775,19 @@ class SimWorker(QThread):
                     cov_out
                 )
 
-                # Combine tape coverage with marker overlap (treated as "light")
                 sn_vals = []
                 ang = math.radians(h)
-                tx, ty = math.cos(ang), math.sin(ang)   # local X (forward)
-                nx, ny = -math.sin(ang), math.cos(ang)  # local Y (left)
+                tx, ty = math.cos(ang), math.sin(ang)
+                nx, ny = -math.sin(ang), math.cos(ang)
                 marker_hit_this_step = False
 
                 for i, s in enumerate(self.robot.sensors):
                     px, py = sens_px[i], sens_py[i]
 
-                    # Oriented square (sensor area)
                     halfS = 0.5 * float(s.sizeMM)
                     sensor_rect = oriented_rect(px, py, tx, ty, halfS, nx, ny, halfS)
                     area_sensor = (2*halfS)*(2*halfS)
 
-                    # Max overlap with any marker rectangle
                     cov_marker = 0.0
                     for Rm in markers:
                         interA = rect_rect_overlap_area(sensor_rect, Rm)
@@ -857,7 +812,6 @@ class SimWorker(QThread):
                     self._marker_logged = True
                     self.logger.log_event("marker_touch", t_ms, x, y, h, {})
 
-                # Controller
                 a_lin = (v - prev_v) / dt
                 a_ang = (w - prev_w) / dt
                 state = {
@@ -872,7 +826,6 @@ class SimWorker(QThread):
                 pwmL = int(ctrl.get("pwm_left", 0))
                 pwmR = int(ctrl.get("pwm_right", 0))
 
-                # First-order wheel dynamics
                 vL_cmd = pwm_to_wheel_v(pwmL)
                 vR_cmd = pwm_to_wheel_v(pwmR)
                 alpha = 1.0 - math.exp(-dt/self.tau)
@@ -883,17 +836,14 @@ class SimWorker(QThread):
                 v = 0.5*(vL + vR)
                 w = (vR - vL)/max(1e-6, trackW)
 
-                # Integrate pose (x,y are the robot ORIGIN)
                 prev_x, prev_y, prev_h = x, y, h
                 h += math.degrees(w*dt)
                 a = math.radians(h)
                 x += v*dt*math.cos(a)
                 y += v*dt*math.sin(a)
 
-                # Log step
                 self.logger.log_step(t_ms, x, y, h, v, w, pwmL, pwmR, sensors=sn_vals)
 
-                # Start/Finish zone
                 if zone_checker is not None:
                     finished = zone_checker.update(
                         (prev_x, prev_y, prev_h),
@@ -906,20 +856,17 @@ class SimWorker(QThread):
                         self.logger.log_event(zone_checker.last_event, t_ms, x, y, h, {})
                     if finished:
                         enter_t_ms = t_ms
-                    # Stop shortly after first re-entry (debounced)
                     if (enter_t_ms is not None) and (t_ms - enter_t_ms >= 100):
                         reason = "finished"
                         self.logger.log_event("finished", t_ms, x, y, h, {"enter_t_ms": enter_t_ms})
                         break
 
-                # Off-track stop: no envelope corner touching the tape
                 tape_half_with_margin = (tapeW * 0.5) + 25.0
                 if not self.envelope_contacts_tape(x, y, h, tape_half_with_margin):
                     reason = "offtrack"
                     self.logger.log_event("offtrack", t_ms, x, y, h, {"criterion": "envelope-not-touching"})
                     break
 
-                # Stream chunk to UI
                 steps_out.append({
                     "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h,
                     "v_mm_s": v, "omega_rad_s": w, "pwmL": pwmL, "pwmR": pwmR
@@ -927,7 +874,6 @@ class SimWorker(QThread):
                 if len(steps_out) >= CHUNK_STEPS:
                     self.sig_chunk.emit(steps_out); steps_out = []
 
-                # Advance time
                 t_s += dt
                 t_ms = int(round(t_s * 1000.0))
 
@@ -942,12 +888,11 @@ class SimWorker(QThread):
                 "reason": reason,
                 "csv": getattr(self.logger, "csv_path", ""),
                 "json": getattr(self.logger, "json_path", ""),
-                "dt_s": self.dt_s  # let UI know which dt was used
+                "dt_s": self.dt_s
             })
         except Exception as e:
             self.sig_fail.emit(str(e))
 
-# ---------- Scene / View ----------
 class SimScene(QGraphicsScene):
     def __init__(self):
         super().__init__()
@@ -955,7 +900,6 @@ class SimScene(QGraphicsScene):
 
     def drawBackground(self, painter: QPainter, rect):
         super().drawBackground(painter, rect)
-        # Subtle grid
         step = 25.0
         pen = QPen(QColor(30, 30, 30), 1)
         painter.setPen(pen)
@@ -972,33 +916,29 @@ class SimView(QGraphicsView):
         self.setRenderHints(self.renderHints() | QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
         self.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
 
     def wheelEvent(self, e):
         s = 1.15 if e.angleDelta().y() > 0 else 1/1.15
         self.scale(s, s)
+        e.accept()
 
-# ---------- Main window (English UI) ----------
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Line-Follower Simulator")
 
-        # Data
         self.track: Optional[Dict[str, Any]] = None
         self.robot: Optional[Robot] = None
         self.controller_fn = lambda state: {"pwm_left": 2000, "pwm_right": 2000}
 
-        # Scene / View
         self.scene = SimScene()
         self.view = SimView(self.scene)
-        self.view.setSceneRect(0, 0, 4000, 3000)
 
-        # Left panel
-        left = QWidget(); form = QFormLayout(left)
+        controls = QWidget(); form = QFormLayout(controls)
 
-        # Unified animation interval (ms) for streaming + replay
-        self.anim_interval_ms = 42  # ~24 FPS
-        # Flag to differentiate streaming vs replay
+        self.anim_interval_ms = 42
         self.streaming = False
 
         self.anim_speed = 1.0
@@ -1007,22 +947,24 @@ class MainWindow(QMainWindow):
         self.anim_steps: List[Dict[str, Any]] = []
         self.anim_items: Dict[str, Any] = {}
 
-        # Worker
         self.worker: Optional[SimWorker] = None
         self.v_max_mm_s = None
 
         self.controller_path = None
-        self.lbl_ctrl_status = QLabel("Controller: not loaded")
+        self.lbl_ctrl_status = QLabel("—")
         self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
 
         self.btn_track = QPushButton("Load track (.json)")
+        self.btn_track.setToolTip("Select a track file (.json).")
         self.btn_robot = QPushButton("Load robot (.json)")
+        self.btn_robot.setToolTip("Select a robot description (.json).")
         self.btn_ctrl  = QPushButton("Load controller (.py)")
+        self.btn_ctrl.setToolTip("Select a Python file implementing control_step(state).")
         self.btn_params = QPushButton("Simulation parameters")
+        self.btn_params.setToolTip("Open a dialog to edit and persist simulation parameters to simulation_parameters.json.")
         self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
         self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 0.100); self.spin_tau.setDecimals(3); self.spin_tau.setSingleStep(0.001); self.spin_tau.setValue(0.010)
 
-        # New: integration step control (ms)
         self.spin_dt  = QDoubleSpinBox()
         self.spin_dt.setRange(0.5, 100.0)
         self.spin_dt.setDecimals(1)
@@ -1030,55 +972,117 @@ class MainWindow(QMainWindow):
         self.spin_dt.setValue(1.0)
         self.sim_dt_s = float(self.spin_dt.value()) / 1000.0
 
-        self.btn_sim   = QPushButton("Start simulation")
+        self.btn_sim   = QPushButton("Start")
+        self.btn_sim.setToolTip("Start a new simulation with the currently loaded track, robot and controller.")
         self.btn_stop  = QPushButton("Stop")
-        self.btn_replay= QPushButton("Replay")
+        self.btn_stop.setToolTip("Stop the running simulation.")
+        self.btn_replay= QPushButton("Play")
+        self.btn_replay.setToolTip("Play the last finished simulation steps.")
 
-        # Removed progress bar to avoid any percent-based UI.
-        self.step_count = 0
-        self.lbl_progress = QLabel("Executed steps: 0"); form.addRow(self.lbl_progress)
-        self.lbl_time = QLabel("Sim time: 0.00 s | Anim speed: 1.0×"); form.addRow(self.lbl_time)
+        self.lbl_time = QLabel("Sim time: 0.00 s")
+        self.lbl_time.setToolTip("Simulation time in seconds based on dt × steps. Updates only during live streaming or replay.")
 
-        # Checkbox to control file logging
         self.chk_log = QCheckBox("Save logs to file (CSV+JSON)")
+        self.chk_log.setToolTip("If enabled, write CSV + JSON logs under the Logs/ folder for each run.")
 
         self.combo_speed = QComboBox()
         self.combo_speed.addItems(["0.1×", "0.5×", "1×", "2×", "4×"])
+        self.combo_speed.setToolTip("Playback speed for visualization only. It does not affect the physics or logged data.")
         self.combo_speed.setCurrentIndex(2)
-        form.addRow(QLabel("Animation speed"), self.combo_speed)
         self.combo_speed.currentIndexChanged.connect(self.on_speed_change)
         self.on_speed_change(self.combo_speed.currentIndex())
 
+        form.addRow(QLabel("<b>Simulation Files</b>"))
+
         form.addRow(self.btn_params)
-        form.addRow(self.btn_ctrl)
-        form.addRow(QLabel("Controller status"), self.lbl_ctrl_status)
-        form.addRow(self.btn_robot)
-        form.addRow(self.btn_track)
+
+        # Controller row: button + status
+        self.lbl_ctrl_status = QLabel("—")
+        self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
+        self.lbl_ctrl_status.setToolTip("Loaded controller file.")
+        row_ctrl = QWidget()
+        row_ctrl_layout = QHBoxLayout(row_ctrl); row_ctrl_layout.setContentsMargins(0,0,0,0)
+        row_ctrl_layout.addWidget(self.btn_ctrl)
+        row_ctrl_layout.addWidget(self.lbl_ctrl_status)
+        form.addRow(row_ctrl)
+
+        # Robot row: button + status
+        self.lbl_robot_status = QLabel("—")
+        self.lbl_robot_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
+        self.lbl_robot_status.setToolTip("Loaded robot file.")
+        row_robot = QWidget()
+        row_robot_layout = QHBoxLayout(row_robot); row_robot_layout.setContentsMargins(0,0,0,0)
+        row_robot_layout.addWidget(self.btn_robot)
+        row_robot_layout.addWidget(self.lbl_robot_status)
+        form.addRow(row_robot)
+
+        self.lbl_track_status = QLabel("—")
+        self.lbl_track_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
+        self.lbl_track_status.setToolTip("Loaded track file.")
+        row_track = QWidget()
+        row_track_layout = QHBoxLayout(row_track); row_track_layout.setContentsMargins(0,0,0,0)
+        row_track_layout.addWidget(self.btn_track)
+        row_track_layout.addWidget(self.lbl_track_status)
+        form.addRow(row_track)
         form.addRow(self.chk_log)
-        form.addRow(self.btn_sim)
-        form.addRow(self.btn_stop)
-        form.addRow(self.btn_replay)
+        form.addRow(QLabel("<b>Simulation Control</b>"))
+        self.step_count = 0
+        self.lbl_progress = QLabel("Executed steps: 0")
+        self.lbl_progress.setToolTip("Number of simulation steps computed so far. During replay this shows the total steps generated.")
+        form.addRow(self.lbl_progress)
+        ctrl_row = QWidget()
+        ctrl_layout = QHBoxLayout(ctrl_row)
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.addWidget(self.btn_sim)
+        ctrl_layout.addWidget(self.btn_stop)
+        form.addRow(ctrl_row)
+
+        form.addRow(QLabel("<b>Replay</b>"))
+
+        self.lbl_time = QLabel("Sim time: 0.00 s")
+        self.lbl_time.setToolTip("Simulation time in seconds from replay/stream only.")
+        replay_info_row = QWidget()
+        replay_info_layout = QHBoxLayout(replay_info_row); replay_info_layout.setContentsMargins(0,0,0,0)
+        replay_info_layout.addWidget(self.lbl_time)
+        replay_info_layout.addWidget(QLabel("Animation speed"))
+        replay_info_layout.addWidget(self.combo_speed)
+        form.addRow(replay_info_row)
+
+        self.btn_replay_stop = QPushButton("Stop")
+        self.btn_replay_stop.setToolTip("Stop the current replay playback.")
+        replay_ctrl_row = QWidget()
+        replay_ctrl_layout = QHBoxLayout(replay_ctrl_row); replay_ctrl_layout.setContentsMargins(0,0,0,0)
+        replay_ctrl_layout.addWidget(self.btn_replay)
+        replay_ctrl_layout.addWidget(self.btn_replay_stop)
+        form.addRow(replay_ctrl_row)
 
         self.btn_params.clicked.connect(self.on_open_params)
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(False)
+        self.is_replaying = False
+        self.update_replay_buttons()
+        self.btn_replay_stop.setEnabled(False)
+        self.update_replay_buttons()
 
         splitter = QSplitter()
-        splitter.addWidget(left)
         splitter.addWidget(self.view)
-        splitter.setSizes([320, 1200])
+        splitter.addWidget(controls)
+        controls.setMinimumWidth(320)
+        controls.setMaximumWidth(420)
+        controls.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
         self.setCentralWidget(splitter)
         self.resize(1280, 800)
 
-        # Signals
         self.btn_track.clicked.connect(self.on_load_track)
         self.btn_robot.clicked.connect(self.on_load_robot)
         self.btn_ctrl.clicked.connect(self.on_load_controller)
         self.btn_sim.clicked.connect(self.on_simulate)
         self.btn_stop.clicked.connect(self.on_stop)
         self.btn_replay.clicked.connect(self.on_replay)
+        self.btn_replay_stop.clicked.connect(self.on_stop_replay)
 
-        # Replay/animation
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
         self._replay_elapsed = QElapsedTimer()
@@ -1086,10 +1090,22 @@ class MainWindow(QMainWindow):
         self._sim_time_acc_s = 0.0
         self.anim_idx = 0
         self.timer.start(self.anim_interval_ms)
+        self.is_replaying = True
+        self.update_replay_buttons()
+        self.btn_replay.setEnabled(False)
+        self.btn_replay_stop.setEnabled(False)
+        self.update_replay_buttons()
 
-        # Reflect dt in window title
         self.spin_dt.valueChanged.connect(self._refresh_title)
 
+
+        # Replay state flag
+        self.is_replaying = False
+
+    def update_replay_buttons(self):
+        has_steps = bool(self.anim_steps)
+        self.btn_replay.setEnabled(has_steps and not self.is_replaying and not self.streaming)
+        self.btn_replay_stop.setEnabled(self.is_replaying)
         self._refresh_title()
 
     def on_open_params(self):
@@ -1124,7 +1140,6 @@ class MainWindow(QMainWindow):
         else:
             pos = origin
 
-        # Body
         hw = self.robot.envelope.widthMM * 0.5
         hh = self.robot.envelope.heightMM * 0.5
         ang = rad(pos.headingDeg)
@@ -1139,7 +1154,6 @@ class MainWindow(QMainWindow):
             poly.moveTo(px, py) if k == 0 else poly.lineTo(px, py)
         self.anim_items["robot"].setPath(poly)
 
-        # Sensors
         for k, s in enumerate(self.robot.sensors):
             px, py = s.xMM - ox, s.yMM - oy
             rx, ry = rot(px, py, ang)
@@ -1149,7 +1163,6 @@ class MainWindow(QMainWindow):
             if k < len(self.anim_items["sensors"]):
                 self.anim_items["sensors"][k].setPath(sp)
 
-        # Wheels
         half_w = WHEEL_W_MM * 0.5
         half_h = WHEEL_H_MM * 0.5
         for k, wdef in enumerate(self.robot.wheels):
@@ -1164,7 +1177,6 @@ class MainWindow(QMainWindow):
             if k < len(self.anim_items["wheels"]):
                 self.anim_items["wheels"][k].setPath(wp)
 
-    # ---------- UI helpers ----------
     def on_speed_change(self, idx: int):
         mapping = {0: 0.1, 1: 0.5, 2: 1.0, 3: 2.0, 4: 4.0}
         self.anim_speed = mapping.get(idx, 1.0)
@@ -1172,11 +1184,7 @@ class MainWindow(QMainWindow):
         fps = 1000.0 / max(1.0, float(self.anim_interval_ms))
         self.anim_spf = max(1, int(round((steps_per_sec * self.anim_speed) / fps)))
         i = self.anim_idx if self.anim_steps else 0
-        self.lbl_time.setText(
-            "Sim time: {:.2f} s | Anim speed: {:.1f}×".format(i*self.sim_dt_s, self.anim_speed)
-        )
 
-# ---------- Loaders ----------
     def on_load_track(self):
         path, _ = QFileDialog.getOpenFileName(self, "Track file", "", "JSON (*.json)")
         if not path: return
@@ -1184,7 +1192,12 @@ class MainWindow(QMainWindow):
             self.track = json.load(f)
         self.draw_static_track()
         if self.robot: self.draw_robot_outline_preview()
-        self.statusBar().showMessage(f"Track: {os.path.basename(path)}")
+        base = os.path.basename(path)
+        if hasattr(self, "lbl_track_status"):
+            self.lbl_track_status.setText(f"{base}   ✓")
+            self.lbl_track_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+            self.lbl_track_status.setToolTip(path)
+        self.statusBar().showMessage(f"Track: {base}")
 
     def on_load_robot(self):
         path, _ = QFileDialog.getOpenFileName(self, "Robot file", "", "JSON (*.json)")
@@ -1192,12 +1205,23 @@ class MainWindow(QMainWindow):
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.robot = robot_from_json(json.load(f))
-            self.statusBar().showMessage(f"Robot: {os.path.basename(path)}", 5000)
+            base = os.path.basename(path)
+            self.statusBar().showMessage(f"Robot: {base}", 5000)
+            if hasattr(self, "lbl_robot_status"):
+                self.lbl_robot_status.setText(f"{base}   ✓")
+                self.lbl_robot_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
+                self.lbl_robot_status.setToolTip(path)
             if self.track: self.draw_robot_outline_preview()
         except Exception as e:
             self.robot = None
             QMessageBox.critical(self, "Robot load error",
                                  f"Failed to read '{os.path.basename(path)}':\n{e}")
+            try:
+                if hasattr(self, "lbl_robot_status"):
+                    self.lbl_robot_status.setText("failed")
+                    self.lbl_robot_status.setStyleSheet("color: #c62828; font-weight: 600;")
+            except Exception:
+                pass
             if self.worker and self.worker.isRunning():
                 try:
                     self.worker.cancelled = True
@@ -1214,7 +1238,7 @@ class MainWindow(QMainWindow):
             self.controller_path = path
 
             base = os.path.basename(path)
-            self.lbl_ctrl_status.setText(f"Loaded: {base}   ✓")
+            self.lbl_ctrl_status.setText(f"{base}   ✓")
             self.lbl_ctrl_status.setStyleSheet("color: #2e7d32; font-weight: 600;")
             self.lbl_ctrl_status.setToolTip(path)
             self.statusBar().showMessage(f"Controller loaded: {base}", 4000)
@@ -1224,12 +1248,11 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.controller_path = None
-            self.lbl_ctrl_status.setText("Controller: load failed")
+            self.lbl_ctrl_status.setText("failed")
             self.lbl_ctrl_status.setStyleSheet("color: #c62828; font-weight: 600;")
             self.statusBar().showMessage("Controller load failed", 5000)
             QMessageBox.critical(self, "Controller load error", str(e))
 
-    # ---------- Static drawing ----------
     def clear_static(self):
         self.scene.clear()
         self.anim_items.clear()
@@ -1265,7 +1288,6 @@ class MainWindow(QMainWindow):
         gates = start_finish_lines(self.track, segs, tapeW)
         if gates:
             (sa, sb, shdg_run, shdg_base), (fa, fb, fhdg_run, fhdg_base) = gates
-            # Build finish->start zone polygon for visualization
             s_mid_x = (sa.x + sb.x) * 0.5; s_mid_y = (sa.y + sb.y) * 0.5
             f_mid_x = (fa.x + fb.x) * 0.5; f_mid_y = (fa.y + fb.y) * 0.5
             ux = s_mid_x - f_mid_x; uy = s_mid_y - f_mid_y
@@ -1285,7 +1307,6 @@ class MainWindow(QMainWindow):
             item = self.scene.addPath(zone, pen)
             item.setBrush(brush)
 
-            # Small right-side ticks for START and FINISH
             def draw_right_rect(pa, pb, base_hdg):
                 a = rad(base_hdg)
                 tx, ty = math.cos(a), math.sin(a)
@@ -1305,11 +1326,11 @@ class MainWindow(QMainWindow):
             draw_right_rect(sa, sb, shdg_base)
             draw_right_rect(fa, fb, fhdg_base)
 
-        # Fit view
-        self.view.fitInView(self.scene.itemsBoundingRect().adjusted(-100, -100, +100, +100), Qt.KeepAspectRatio)
+        bbox = self.scene.itemsBoundingRect().adjusted(-200, -200, +200, +200)
+        self.scene.setSceneRect(bbox)
+        self.view.fitInView(bbox, Qt.KeepAspectRatio)
 
     def draw_robot_outline_preview(self):
-        """Draw envelope & sensors at initial pose (behind START or at origin)."""
         if not (self.track and self.robot): return
         self.draw_static_track()
         self.reset_anim_items()
@@ -1364,21 +1385,18 @@ class MainWindow(QMainWindow):
             item.setBrush(WHEEL_BRUSH)
             self.anim_items["wheels"].append(item)
 
-    # ---------- Simulation ----------
     def on_simulate(self):
         if not (self.track and self.robot):
             self.streaming = True
             QMessageBox.warning(self, "Missing data", "Load a track and a robot.")
             return
 
-        # Clear any previous replay
         if self.timer.isActive():
             self.timer.stop()
         self.reset_anim_items()
         self._trail_last_pt = None
         self._draw_robot_at_initial_pose()
 
-        # Reset animation buffers
         self.anim_steps.clear()
         self.anim_idx = 0
         self.step_count = 0
@@ -1397,7 +1415,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # Spawn worker (pass logging preference and dt)
         save_logs = self.chk_log.isChecked()
         self.worker = SimWorker(
             self.track, self.robot, self.controller_fn,
@@ -1410,7 +1427,6 @@ class MainWindow(QMainWindow):
         self.worker.start(QThread.TimeCriticalPriority)
 
     def _speed_color(self, v_mm_s: float) -> QColor:
-        """Color map for velocity: 0→blue, 0.5*vmax→magenta, 1.0*vmax→red."""
         vmax = max(1e-6, float(self.v_max_mm_s or (self.spin_vf.value()*1000.0)))
         t = max(0.0, min(1.0, v_mm_s / vmax))
         if t <= 0.5:
@@ -1422,7 +1438,6 @@ class MainWindow(QMainWindow):
         return QColor(r, g, b)
 
     def on_stop(self):
-        """Stop replay timer and cancel worker thread."""
         self.streaming = False
         if self.timer.isActive():
             self.timer.stop()
@@ -1434,7 +1449,10 @@ class MainWindow(QMainWindow):
                 pass
         self.btn_sim.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.btn_replay.setEnabled(bool(self.anim_steps))
+        self.is_replaying = False
+        self.update_replay_buttons()
+        if hasattr(self, "btn_replay_stop"):
+            self.btn_replay_stop.setEnabled(False)
 
     def on_stream_chunk(self, chunk: List[dict]):
         self.anim_steps.extend(chunk)
@@ -1447,6 +1465,8 @@ class MainWindow(QMainWindow):
             else:
                 self._replay_elapsed.restart()
             self.timer.start(self.anim_interval_ms)
+        self.is_replaying = False
+        self.update_replay_buttons()
 
     def on_stream_done(self, info: dict):
         self.streaming = False
@@ -1456,7 +1476,10 @@ class MainWindow(QMainWindow):
 
         self.btn_sim.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.btn_replay.setEnabled(True)
+        self.is_replaying = False
+        self.update_replay_buttons()
+        if hasattr(self, "btn_replay_stop"):
+            self.btn_replay_stop.setEnabled(False)
 
         if self.timer.isActive():
             self.timer.stop()
@@ -1464,7 +1487,6 @@ class MainWindow(QMainWindow):
         self.anim_idx = 0
         self._trail_last_pt = None
 
-        # If worker told us its dt, trust it (guarding future changes)
         if isinstance(info, dict) and "dt_s" in info and isinstance(info["dt_s"], (int, float)):
             self.sim_dt_s = float(info["dt_s"])
 
@@ -1477,6 +1499,8 @@ class MainWindow(QMainWindow):
 
         if self.anim_steps:
             self.timer.start(self.anim_interval_ms)
+        self.is_replaying = False
+        self.update_replay_buttons()
 
     def on_stream_fail(self, msg: str):
         self.worker = None
@@ -1484,7 +1508,6 @@ class MainWindow(QMainWindow):
         self.btn_sim.setEnabled(True)
         QMessageBox.critical(self, "Error", msg)
 
-    # ---------- Replay ----------
     def reset_anim_items(self):
         for it in list(self.anim_items.values()):
             if isinstance(it, list):
@@ -1513,12 +1536,25 @@ class MainWindow(QMainWindow):
         self.reset_anim_items()
         self.anim_idx = 0
         self._sim_time_acc_s = 0.0
+        self.is_replaying = True
+        self.update_replay_buttons()
         if self._replay_elapsed is None:
             self._replay_elapsed = QElapsedTimer()
             self._replay_elapsed.start()
         else:
             self._replay_elapsed.restart()
         self.timer.start(self.anim_interval_ms)
+        self.is_replaying = False
+        self.update_replay_buttons()
+
+    def on_stop_replay(self):
+        if self.timer.isActive():
+            self.timer.stop()
+        self.is_replaying = False
+        self.update_replay_buttons()
+        if hasattr(self, "btn_replay_stop"):
+            self.btn_replay_stop.setEnabled(False)
+        self.btn_replay_stop.setEnabled(False)
 
     def closeEvent(self, event):
         try:
@@ -1532,7 +1568,6 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
 
     def tick(self):
-        """Advance the animation by N stored steps per frame."""
         if not self.anim_steps:
             self.timer.stop()
             return
@@ -1558,14 +1593,13 @@ class MainWindow(QMainWindow):
             h = float(step.get("heading_deg", 0.0))
 
             sim_t_s = self.anim_idx * self.sim_dt_s
-            self.lbl_time.setText(f"Sim time: {sim_t_s:.2f} s | Anim speed: {self.anim_speed:.1f}×")
+            self.lbl_time.setText(f"Sim time: {sim_t_s:.2f} s")
 
             v_now = float(step.get("v_mm_s", 0.0))
 
             if self.anim_idx == 0:
                 self._trail_last_pt = None
 
-            # Trail
             if self._trail_last_pt is None:
                 self._trail_last_pt = (x, y)
             else:
@@ -1575,7 +1609,6 @@ class MainWindow(QMainWindow):
                 self.anim_items.setdefault("trail_items", []).append(seg)
                 self._trail_last_pt = (x, y)
 
-            # Robot drawing (origin-offset envelope)
             if self.robot:
                 hw = self.robot.envelope.widthMM / 2.0
                 hh = self.robot.envelope.heightMM / 2.0
@@ -1590,7 +1623,6 @@ class MainWindow(QMainWindow):
                     poly.moveTo(px, py) if k == 0 else poly.lineTo(px, py)
                 self.anim_items["robot"].setPath(poly)
 
-                # Sensors
                 for k, s in enumerate(self.robot.sensors):
                     px, py = s.xMM - self.robot.originXMM, s.yMM - self.robot.originYMM
                     rx, ry = rot(px, py, ang)
@@ -1600,7 +1632,6 @@ class MainWindow(QMainWindow):
                     if k < len(self.anim_items["sensors"]):
                         self.anim_items["sensors"][k].setPath(sp)
 
-                # Wheels (22x15 mm)
                 half_w = WHEEL_W_MM * 0.5
                 half_h = WHEEL_H_MM * 0.5
                 for k, wdef in enumerate(self.robot.wheels):
@@ -1621,9 +1652,8 @@ class MainWindow(QMainWindow):
             self.anim_idx += 1
 
         sim_t_s = (self.anim_idx * self.sim_dt_s)
-        self.lbl_time.setText("Sim time: {:.2f} s | Anim speed: {:.1f}×".format(sim_t_s, self.anim_speed))
+        self.lbl_time.setText("Sim time: {:.2f} s".format(sim_t_s, self.anim_speed))
 
-# ---------- Main ----------
 def main():
     app = QApplication(sys.argv)
     win = MainWindow()

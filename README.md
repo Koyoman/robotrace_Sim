@@ -116,14 +116,14 @@ Simulation settings live in `simulation_parameters.json` (project root) **and** 
 
 ## 🧩 Controllers (Python-only)
 
-Plug your controller as a `.py` file. The simulator loads it dynamically and calls **`control_step(state)`** every integration tick.
+Plug your controller as a `.py` file. The simulator loads it dynamically and calls **`control_step(state)`** every simulation tick.
 
 ### Exact function signature and state payload
 
 ```python
 def control_step(state: dict) -> dict:
     """
-    Called every integration step. Must be non-blocking.
+    Called every simulation step. Must be non-blocking.
     The simulator passes EXACTLY the following structure and units:
 
     Parameters
