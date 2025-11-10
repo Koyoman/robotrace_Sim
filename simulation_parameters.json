@@ -2,8 +2,10 @@
   "final_linear_speed_mps": 2.1,
   "motor_time_constant_s": 0.001,
   "simulation_step_dt_ms": 1.0,
-  "sensor_mode": "digital",
+  "sensor_mode": "analog",
+  "sensor_bits": 8,
   "value_of_line": 255,
   "value_of_background": 0,
-  "analog_variation": 50
+  "analog_noise_line": 50,
+  "analog_noise_background": 50
 }

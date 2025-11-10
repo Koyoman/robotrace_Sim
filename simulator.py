@@ -354,9 +354,11 @@ DEFAULT_SIM_PARAMS = {
     "motor_time_constant_s": 0.010,
     "simulation_step_dt_ms": 1.0,
     "sensor_mode": "analog",
+    "sensor_bits": 8,
     "value_of_line": 0,
     "value_of_background": 255,
-    "analog_variation": 50
+    "analog_noise_line": 50,
+    "analog_noise_background": 50
 }
 
 def load_sim_params() -> dict:
@@ -376,9 +378,12 @@ def save_sim_params(params: dict) -> None:
     p["motor_time_constant_s"]  = max(0.001, min(0.100, float(p["motor_time_constant_s"])))
     p["simulation_step_dt_ms"] = max(0.5,  min(100.0, float(p["simulation_step_dt_ms"])))
     p["sensor_mode"]            = "digital" if str(p.get("sensor_mode","analog")).lower().startswith("d") else "analog"
-    p["value_of_line"]          = int(max(0, min(255, int(p["value_of_line"]))))
-    p["value_of_background"]         = int(max(0, min(255, int(p["value_of_background"]))))
-    p["analog_variation"]       = int(max(0, min(255, int(p["analog_variation"]))))
+    p["sensor_bits"]            = int(max(1, min(16, int(p.get("sensor_bits", 8)))))
+    maxv = (1 << int(p["sensor_bits"])) - 1
+    p["value_of_line"]          = int(max(0, min(maxv, int(p["value_of_line"]))))
+    p["value_of_background"]    = int(max(0, min(maxv, int(p["value_of_background"]))))
+    p["analog_noise_line"]       = int(max(0, min(maxv, int(p.get("analog_noise_line", 0)))))
+    p["analog_noise_background"]      = int(max(0, min(maxv, int(p.get("analog_noise_background", 0)))))
     with open(PARAMS_JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(p, f, indent=2, ensure_ascii=False)
 
@@ -387,6 +392,16 @@ class SimulationParamsDialog(QDialog):
     """Small dialog to view/edit and persist simulation parameters to JSON."""
     def __init__(self, parent=None):
         """Set up references, parameters, and optional logger for a simulation run."""
+        def _apply_mode_enabling():
+            is_digital = (self.combo_sensor.currentText().lower().startswith("d"))
+            self.sp_noise_lo.setEnabled(not is_digital)
+            self.sp_noise_hi.setEnabled(not is_digital)
+
+        def _apply_bit_ranges():
+            maxv = (1 << int(self.sp_bits.value())) - 1
+            for w in (self.sp_line, self.sp_bg, self.sp_noise_lo, self.sp_noise_hi):
+                w.setMaximum(maxv)
+
         super().__init__(parent)
         self.setWindowTitle("Simulation parameters")
         self.setModal(True)
@@ -395,67 +410,91 @@ class SimulationParamsDialog(QDialog):
 
         root = QVBoxLayout(self)
 
-        row1 = QHBoxLayout()
-        lbl1 = QLabel("Final linear speed (m/s)")
-        self.ed_vf = QDoubleSpinBox()
-        self.ed_vf.setRange(0.1, 20.0)
-        self.ed_vf.setSingleStep(0.1)
-        self.ed_vf.setValue(float(params["final_linear_speed_mps"]))
-        row1.addWidget(lbl1); row1.addWidget(self.ed_vf)
-        root.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        lbl2 = QLabel("Motor time constant τ (s)")
-        self.ed_tau = QDoubleSpinBox()
-        self.ed_tau.setRange(0.001, 0.100)
-        self.ed_tau.setDecimals(3)
-        self.ed_tau.setSingleStep(0.001)
-        self.ed_tau.setValue(float(params["motor_time_constant_s"]))
-        row2.addWidget(lbl2); row2.addWidget(self.ed_tau)
-        root.addLayout(row2)
+        root.addWidget(QLabel("<b>Simulation</b>"))
 
         row3 = QHBoxLayout()
-        lbl3 = QLabel("Simulation step dt (ms)")
-        self.ed_dt = QDoubleSpinBox()
-        self.ed_dt.setRange(0.5, 100.0)
-        self.ed_dt.setDecimals(1)
-        self.ed_dt.setSingleStep(0.5)
+        lbl3 = QLabel("Step dt (ms)")
+        lbl3.setToolTip("Physics integration step in milliseconds. Smaller values increase accuracy at the cost of speed.")
+        self.ed_dt = QDoubleSpinBox(); self.ed_dt.setRange(0.5, 100.0); self.ed_dt.setDecimals(1); self.ed_dt.setSingleStep(0.5)
         self.ed_dt.setValue(float(params["simulation_step_dt_ms"]))
+        self.ed_dt.setToolTip("Time step used by the simulator loop.")
         row3.addWidget(lbl3); row3.addWidget(self.ed_dt)
         root.addLayout(row3)
 
+        root.addWidget(QLabel("<b>Motor</b>"))
+        row2 = QHBoxLayout()
+        lbl2 = QLabel("Time constant τ (s)")
+        lbl2.setToolTip("First-order time constant for wheel speed response. Lower is more responsive.")
+        self.ed_tau = QDoubleSpinBox(); self.ed_tau.setRange(0.001, 0.100); self.ed_tau.setDecimals(3); self.ed_tau.setSingleStep(0.001)
+        self.ed_tau.setValue(float(params["motor_time_constant_s"]))
+        self.ed_tau.setToolTip("Defines how quickly the motor speeds follow PWM commands.")
+        row2.addWidget(lbl2); row2.addWidget(self.ed_tau)
+        root.addLayout(row2)
+
+        row1 = QHBoxLayout()
+        lbl1 = QLabel("Linear speed (m/s)")
+        lbl1.setToolTip("Target steady-state robot speed in meters per second. Used as v_final for motor dynamics.")
+        self.ed_vf = QDoubleSpinBox(); self.ed_vf.setRange(0.1, 20.0); self.ed_vf.setSingleStep(0.1)
+        self.ed_vf.setValue(float(params["final_linear_speed_mps"]))
+        self.ed_vf.setToolTip("Sets the reference maximum linear speed used by the dynamics model.")
+        row1.addWidget(lbl1); row1.addWidget(self.ed_vf)
+        root.addLayout(row1)
+
+        root.addWidget(QLabel("<b>Sensors</b>"))
         row4 = QHBoxLayout()
-        lbl4 = QLabel("Sensors type")
-        self.combo_sensor = QComboBox()
-        self.combo_sensor.addItems(["analog", "digital"])
+        lbl4 = QLabel("Type")
+        lbl4.setToolTip("Select whether sensor outputs are analog values or single-level digital values.")
+        self.combo_sensor = QComboBox(); self.combo_sensor.addItems(["analog", "digital"])
         idx = 1 if str(params["sensor_mode"]).lower().startswith("d") else 0
         self.combo_sensor.setCurrentIndex(idx)
+        self.combo_sensor.setToolTip("Analog produces integer readings within the configured bit range; digital produces two fixed levels.")
         row4.addWidget(lbl4); row4.addWidget(self.combo_sensor)
         root.addLayout(row4)
 
+        row_bits = QHBoxLayout()
+        lbl_bits = QLabel("N Data Bits")
+        lbl_bits.setToolTip("Resolution for sensor readings. Sets the valid range as 0..(2^n - 1).")
+        self.sp_bits = QSpinBox(); self.sp_bits.setRange(1, 16); self.sp_bits.setValue(int(params.get("sensor_bits", 8)))
+        self.sp_bits.setToolTip("Number of bits for sensor values. Changing this updates value limits automatically.")
+        row_bits.addWidget(lbl_bits); row_bits.addWidget(self.sp_bits)
+        root.addLayout(row_bits)
+
         row5 = QHBoxLayout()
-        lbl5 = QLabel("Value of line (0..255)")
-        self.sp_line = QSpinBox()
-        self.sp_line.setRange(0, 255)
-        self.sp_line.setValue(int(params["value_of_line"]))
+        lbl5 = QLabel("Value of line")
+        lbl5.setToolTip("Output value when the sensor covers the tape/line (0..max based on bits).")
+        self.sp_line = QSpinBox(); self.sp_line.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_line.setValue(int(params["value_of_line"]))
+        self.sp_line.setToolTip("Line intensity level used to synthesize sensor readings.")
         row5.addWidget(lbl5); row5.addWidget(self.sp_line)
         root.addLayout(row5)
 
         row6 = QHBoxLayout()
-        lbl6 = QLabel("Value of table (0..255)")
-        self.sp_table = QSpinBox()
-        self.sp_table.setRange(0, 255)
-        self.sp_table.setValue(int(params["value_of_background"]))
-        row6.addWidget(lbl6); row6.addWidget(self.sp_table)
+        lbl6 = QLabel("Value of background")
+        lbl6.setToolTip("Output value when the sensor sees the board/background (0..max based on bits).")
+        self.sp_bg = QSpinBox(); self.sp_bg.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_bg.setValue(int(params["value_of_background"]))
+        self.sp_bg.setToolTip("Background intensity level used to synthesize sensor readings.")
+        row6.addWidget(lbl6); row6.addWidget(self.sp_bg)
         root.addLayout(row6)
 
         row7 = QHBoxLayout()
-        lbl7 = QLabel("Analog variation (amplitude)")
-        self.sp_vari = QSpinBox()
-        self.sp_vari.setRange(0, 255)
-        self.sp_vari.setValue(int(params["analog_variation"]))
-        row7.addWidget(lbl7); row7.addWidget(self.sp_vari)
+        lbl7 = QLabel("Analog noise line")
+        lbl7.setToolTip("Defines the random variation applied to the sensor readings when detecting the line. Used only in analog mode.")
+        self.sp_noise_lo = QSpinBox(); self.sp_noise_lo.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_noise_lo.setValue(int(params.get("analog_noise_line", 0)))
+        self.sp_noise_lo.setToolTip("Maximum amplitude of noise affecting line readings (0 means no noise).")
+        row7.addWidget(lbl7); row7.addWidget(self.sp_noise_lo)
         root.addLayout(row7)
+
+        row8 = QHBoxLayout()
+        lbl8 = QLabel("Analog noise background")
+        lbl8.setToolTip("Defines the random variation applied to the sensor readings when detecting the background area. Used only in analog mode.")
+        self.sp_noise_hi = QSpinBox(); self.sp_noise_hi.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_noise_hi.setValue(int(params.get("analog_noise_background", 0)))
+        self.sp_noise_hi.setToolTip("Maximum amplitude of noise affecting background readings (0 means no noise).")
+        row8.addWidget(lbl8); row8.addWidget(self.sp_noise_hi)
+        root.addLayout(row8)
+
+        self.sp_bits.valueChanged.connect(_apply_bit_ranges)
+        _apply_bit_ranges()
+        self.combo_sensor.currentIndexChanged.connect(lambda _: _apply_mode_enabling())
+        _apply_mode_enabling()
 
         btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
         btns.accepted.connect(self._on_save)
@@ -468,9 +507,11 @@ class SimulationParamsDialog(QDialog):
             "motor_time_constant_s":  float(self.ed_tau.value()),
             "simulation_step_dt_ms": float(self.ed_dt.value()),
             "sensor_mode":            str(self.combo_sensor.currentText()).lower(),
+            "sensor_bits":            int(self.sp_bits.value()),
             "value_of_line":          int(self.sp_line.value()),
-            "value_of_background":         int(self.sp_table.value()),
-            "analog_variation":       int(self.sp_vari.value())
+            "value_of_background":    int(self.sp_bg.value()),
+            "analog_noise_line":       int(self.sp_noise_lo.value()),
+            "analog_noise_background":      int(self.sp_noise_hi.value())
         }
         save_sim_params(data)
         self.accept()
@@ -531,30 +572,43 @@ def robot_from_json(obj: Dict[str, Any]) -> Robot:
 
 def sensor_value_from_coverage(cov: float,
                                sensor_mode: str,
+                               sensor_bits: int,
                                value_of_line: int,
                                value_of_background: int,
-                               analog_variation: int) -> int:
+                               analog_noise_line: int,
+                               analog_noise_background: int) -> int:
+    """Return a synthesized sensor reading given coverage.
+    - sensor_bits defines the ADC resolution (0..2^n-1)
+    - value_of_line/background are base levels
+    - analog_noise_line/background define random deviations around the base in analog mode
+    """
     cov = max(0.0, min(1.0, float(cov)))
     is_line = (cov >= 0.5)
 
     mode = ("digital" if str(sensor_mode).lower().startswith("d") else "analog")
-    v_line  = int(max(0, min(1023, int(value_of_line))))
-    v_table = int(max(0, min(1023, int(value_of_background))))
-    amp     = int(max(0, min(1023, int(analog_variation))))
+    nbits = int(max(1, min(16, int(sensor_bits))))
+    maxv = (1 << nbits) - 1
+    base_line = int(max(0, min(maxv, int(value_of_line))))
+    base_bg   = int(max(0, min(maxv, int(value_of_background))))
+    noise_line = int(max(0, min(maxv, int(analog_noise_line))))
+    noise_bg   = int(max(0, min(maxv, int(analog_noise_background))))
+
+    base = base_line if is_line else base_bg
 
     if mode == "digital":
-        base = v_line if is_line else v_table
         return base
 
-    base = v_line if is_line else v_table
     if is_line:
-        hi = base
-        lo = max(0, base - amp)
-        return random.randint(lo, hi)
+        lo = max(0, base_line - noise_line)
+        hi = min(maxv, base_line + noise_line)
     else:
-        lo = base
-        hi = min(1023, base + amp)
-        return random.randint(lo, hi)
+        lo = max(0, base_bg - noise_bg)
+        hi = min(maxv, base_bg + noise_bg)
+
+    if hi < lo:
+        lo, hi = hi, lo
+
+    return random.randint(lo, hi)
 
 def load_python_controller(path: str):
     """Load a Python file and return its control_step(state) function."""
@@ -802,10 +856,12 @@ class SimWorker(QThread):
         self.tau     = max(0.001, min(0.100, float(params.get("motor_time_constant_s", 0.01))))
         self.dt_s    = max(0.0005, min(0.1,  float(params.get("simulation_step_dt_ms", 1.0)) / 1000.0))
 
-        self.sensor_mode      = params.get("sensor_mode", "analog")
-        self.value_of_line    = int(params.get("value_of_line", 255))
-        self.value_of_background   = int(params.get("value_of_background", 0))
-        self.analog_variation = int(params.get("analog_variation", 50))
+        self.sensor_mode       = params.get("sensor_mode", "analog")
+        self.sensor_bits       = int(params.get("sensor_bits", 8))
+        self.value_of_line     = int(params.get("value_of_line", 255))
+        self.value_of_background = int(params.get("value_of_background", 0))
+        self.analog_noise_line  = int(params.get("analog_noise_line", 50))
+        self.analog_noise_background = int(params.get("analog_noise_background", 50))
 
         self.logger = SimLogger(base_dir=_here) if save_logs else NoopLogger()
         self._marker_logged = False
@@ -1009,7 +1065,9 @@ class SimWorker(QThread):
                 sx, sy = self._sensors_world_xy(x, y, h)
                 cov = self._coverage_from_raster_batch(sx, sy, sensor_half*2.0, grid_n=3)
                 sn_vals = [sensor_value_from_coverage(
-                    cov[i], self.sensor_mode, self.value_of_line, self.value_of_background, self.analog_variation
+                    cov[i], self.sensor_mode, self.sensor_bits,
+                    self.value_of_line, self.value_of_background,
+                    self.analog_noise_line, self.analog_noise_background
                 ) for i in range(len(cov))]
 
                 a_lin = (v - prev_v) / max(1e-9, dt)
