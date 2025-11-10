@@ -73,5 +73,74 @@
       "yMM": 35.0,
       "sizeMM": 5.0
     }
-  ]
+  ],
+  "electrical": {
+    "batteryVoltageV": 7.4,
+    "batteryCapacitymAh": 850.0,
+    "battery_C_rate": 20.0,
+    "R_batt_ohm": 0.0
+  },
+  "geometric_mechanical": {
+    "body_length_mm": 160.0,
+    "body_width_mm": 140.0,
+    "body_height_mm": 0.0,
+    "wheel_radius_mm": 11.0,
+    "wheel_width_mm": 22.0,
+    "wheel_height_mm": 15.0,
+    "wheelbase_mm": 70.0,
+    "wheelbase_offset_mm": 0.0,
+    "mass_kg": 0.2,
+    "J_body_kgm2": 0.0,
+    "mu_friction": 1.0
+  },
+  "motor_transmission": {
+    "NoLoadRPM": 10000.0,
+    "MaxCurrentA": 1.0,
+    "gear_ratio": 1.0,
+    "eta": 1.0,
+    "Kv_rpm_per_V": 0.0,
+    "Kv_rad_per_V": 0.0,
+    "Kt_Nm_per_A": 0.0,
+    "R_motor_ohm": 0.0,
+    "J_motor_kgm2": 0.0,
+    "J_load_kgm2": 0.0
+  },
+  "controller": {
+    "pwm_resolution_bits": 12,
+    "pwm_frequency_Hz": 20000.0,
+    "deadband_percent": 0.0,
+    "pwm_max": 4095,
+    "pwm_min": -4095
+  },
+  "sensorsConfig": {
+    "sensor_mode": "analog",
+    "sensor_bits": 8,
+    "value_of_line": 0,
+    "value_of_background": 255,
+    "analog_noise_line": 50,
+    "analog_noise_background": 50
+  },
+  "encoders": {
+    "enable": false,
+    "type": "incremental",
+    "ppr": 0,
+    "resolution_bits": 0,
+    "noise_std_pulses": 0.0,
+    "update_rate_Hz": 0.0
+  },
+  "imu": {
+    "enable": false,
+    "std_deg": 0.0,
+    "bias_deg_s": 0.0,
+    "update_rate_Hz": 0.0,
+    "latency_ms": 0.0
+  },
+  "odometry": {
+    "enable": false,
+    "noise_std_mm": 0.0,
+    "noise_std_deg": 0.0,
+    "bias_mm": 0.0,
+    "bias_deg": 0.0,
+    "update_rate_Hz": 0.0
+  }
 }
