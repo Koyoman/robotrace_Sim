@@ -96,26 +96,56 @@
     ]
   },
   "electrical": {
-    "batteryVoltageV": 7.4,
-    "batteryCapacitymAh": 850.0,
-    "R_batt_ohm": 0.0,
-    "wiring_R_ohm": 0.0,
-    "driver_drop_V": 0.0
+    "batteryVoltageV": 8.0,
+    "batteryCapacitymAh": 400.0,
+    "R_batt_ohm": 0.08,
+    "wiring_R_ohm": 0.03,
+    "driver_drop_V": 0.2,
+    "battery_OCV_table": [
+      [
+        0.0,
+        6.0
+      ],
+      [
+        0.1,
+        7.0
+      ],
+      [
+        0.2,
+        7.4
+      ],
+      [
+        0.5,
+        7.7
+      ],
+      [
+        0.8,
+        8.0
+      ],
+      [
+        0.9,
+        8.2
+      ],
+      [
+        1.0,
+        8.4
+      ]
+    ]
   },
   "motor_transmission": {
-    "gear_ratio": 5.48,
-    "eta": 1.0,
-    "R_motor_ohm": 0.0,
-    "L_motor_H": 0.0,
-    "Kv_rpm_per_V": 0.0,
-    "Kv_rad_per_V": 0.0,
-    "Kt_Nm_per_A": 0.0,
-    "I0_noLoad_A": 0.0,
-    "b_visc_Nm_per_radps": 0.0,
-    "tau_coulomb_Nm": 0.0,
-    "J_motor_kgm2": 0.0,
+    "gear_ratio": 9.96,
+    "eta": 0.9,
+    "R_motor_ohm": 4.0,
+    "L_motor_H": 0.00015,
+    "Kv_rpm_per_V": 5478.655528120322,
+    "Kv_rad_per_V": 573.7234652897304,
+    "Kt_Nm_per_A": 0.001743,
+    "I0_noLoad_A": 0.15,
+    "b_visc_Nm_per_radps": 7e-08,
+    "tau_coulomb_Nm": 0.000261,
+    "J_motor_kgm2": 1e-08,
     "J_load_kgm2": 0.0,
-    "stallCurrent_A": 0.0,
+    "stallCurrent_A": 1.5,
     "driver_current_limit_A": 0.0
   },
   "controller": {

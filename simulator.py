@@ -347,175 +347,6 @@ def start_finish_lines(track: Dict[str, Any], segs: List[object], tapeW: float):
     finish_pose = gate_at(max(0.0, sParam - START_FINISH_GAP_MM))
     return (start_pose, finish_pose) if startIsFwd else (finish_pose, start_pose)
 
-PARAMS_JSON_PATH = os.path.join(_here, "simulation_parameters.json")
-
-DEFAULT_SIM_PARAMS = {
-    "final_linear_speed_mps": 2.0,
-    "motor_time_constant_s": 0.010,
-    "simulation_step_dt_ms": 1.0,
-    "sensor_mode": "analog",
-    "sensor_bits": 8,
-    "value_of_line": 0,
-    "value_of_background": 255,
-    "analog_noise_line": 50,
-    "analog_noise_background": 50
-}
-
-def load_sim_params() -> dict:
-    try:
-        with open(PARAMS_JSON_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        out = DEFAULT_SIM_PARAMS.copy()
-        out.update({k: data.get(k, out[k]) for k in out.keys()})
-        return out
-    except Exception:
-        return DEFAULT_SIM_PARAMS.copy()
-
-def save_sim_params(params: dict) -> None:
-    p = DEFAULT_SIM_PARAMS.copy()
-    p.update(params or {})
-    p["final_linear_speed_mps"] = max(0.1, min(20.0, float(p["final_linear_speed_mps"])))
-    p["motor_time_constant_s"]  = max(0.001, min(0.100, float(p["motor_time_constant_s"])))
-    p["simulation_step_dt_ms"] = max(0.5,  min(100.0, float(p["simulation_step_dt_ms"])))
-    p["sensor_mode"]            = "digital" if str(p.get("sensor_mode","analog")).lower().startswith("d") else "analog"
-    p["sensor_bits"]            = int(max(1, min(16, int(p.get("sensor_bits", 8)))))
-    maxv = (1 << int(p["sensor_bits"])) - 1
-    p["value_of_line"]          = int(max(0, min(maxv, int(p["value_of_line"]))))
-    p["value_of_background"]    = int(max(0, min(maxv, int(p["value_of_background"]))))
-    p["analog_noise_line"]       = int(max(0, min(maxv, int(p.get("analog_noise_line", 0)))))
-    p["analog_noise_background"]      = int(max(0, min(maxv, int(p.get("analog_noise_background", 0)))))
-    with open(PARAMS_JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump(p, f, indent=2, ensure_ascii=False)
-
-
-class SimulationParamsDialog(QDialog):
-    """Small dialog to view/edit and persist simulation parameters to JSON."""
-    def __init__(self, parent=None):
-        """Set up references, parameters, and optional logger for a simulation run."""
-        def _apply_mode_enabling():
-            is_digital = (self.combo_sensor.currentText().lower().startswith("d"))
-            self.sp_noise_lo.setEnabled(not is_digital)
-            self.sp_noise_hi.setEnabled(not is_digital)
-
-        def _apply_bit_ranges():
-            maxv = (1 << int(self.sp_bits.value())) - 1
-            for w in (self.sp_line, self.sp_bg, self.sp_noise_lo, self.sp_noise_hi):
-                w.setMaximum(maxv)
-
-        super().__init__(parent)
-        self.setWindowTitle("Simulation parameters")
-        self.setModal(True)
-
-        params = load_sim_params()
-
-        root = QVBoxLayout(self)
-
-        root.addWidget(QLabel("<b>Simulation</b>"))
-
-        row3 = QHBoxLayout()
-        lbl3 = QLabel("Step dt (ms)")
-        lbl3.setToolTip("Physics integration step in milliseconds. Smaller values increase accuracy at the cost of speed.")
-        self.ed_dt = QDoubleSpinBox(); self.ed_dt.setRange(0.5, 100.0); self.ed_dt.setDecimals(1); self.ed_dt.setSingleStep(0.5)
-        self.ed_dt.setValue(float(params["simulation_step_dt_ms"]))
-        self.ed_dt.setToolTip("Time step used by the simulator loop.")
-        row3.addWidget(lbl3); row3.addWidget(self.ed_dt)
-        root.addLayout(row3)
-
-        root.addWidget(QLabel("<b>Motor</b>"))
-        row2 = QHBoxLayout()
-        lbl2 = QLabel("Time constant τ (s)")
-        lbl2.setToolTip("First-order time constant for wheel speed response. Lower is more responsive.")
-        self.ed_tau = QDoubleSpinBox(); self.ed_tau.setRange(0.001, 0.100); self.ed_tau.setDecimals(3); self.ed_tau.setSingleStep(0.001)
-        self.ed_tau.setValue(float(params["motor_time_constant_s"]))
-        self.ed_tau.setToolTip("Defines how quickly the motor speeds follow PWM commands.")
-        row2.addWidget(lbl2); row2.addWidget(self.ed_tau)
-        root.addLayout(row2)
-
-        row1 = QHBoxLayout()
-        lbl1 = QLabel("Linear speed (m/s)")
-        lbl1.setToolTip("Target steady-state robot speed in meters per second. Used as v_final for motor dynamics.")
-        self.ed_vf = QDoubleSpinBox(); self.ed_vf.setRange(0.1, 20.0); self.ed_vf.setSingleStep(0.1)
-        self.ed_vf.setValue(float(params["final_linear_speed_mps"]))
-        self.ed_vf.setToolTip("Sets the reference maximum linear speed used by the dynamics model.")
-        row1.addWidget(lbl1); row1.addWidget(self.ed_vf)
-        root.addLayout(row1)
-
-        root.addWidget(QLabel("<b>Sensors</b>"))
-        row4 = QHBoxLayout()
-        lbl4 = QLabel("Type")
-        lbl4.setToolTip("Select whether sensor outputs are analog values or single-level digital values.")
-        self.combo_sensor = QComboBox(); self.combo_sensor.addItems(["analog", "digital"])
-        idx = 1 if str(params["sensor_mode"]).lower().startswith("d") else 0
-        self.combo_sensor.setCurrentIndex(idx)
-        self.combo_sensor.setToolTip("Analog produces integer readings within the configured bit range; digital produces two fixed levels.")
-        row4.addWidget(lbl4); row4.addWidget(self.combo_sensor)
-        root.addLayout(row4)
-
-        row_bits = QHBoxLayout()
-        lbl_bits = QLabel("N Data Bits")
-        lbl_bits.setToolTip("Resolution for sensor readings. Sets the valid range as 0..(2^n - 1).")
-        self.sp_bits = QSpinBox(); self.sp_bits.setRange(1, 16); self.sp_bits.setValue(int(params.get("sensor_bits", 8)))
-        self.sp_bits.setToolTip("Number of bits for sensor values. Changing this updates value limits automatically.")
-        row_bits.addWidget(lbl_bits); row_bits.addWidget(self.sp_bits)
-        root.addLayout(row_bits)
-
-        row5 = QHBoxLayout()
-        lbl5 = QLabel("Value of line")
-        lbl5.setToolTip("Output value when the sensor covers the tape/line (0..max based on bits).")
-        self.sp_line = QSpinBox(); self.sp_line.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_line.setValue(int(params["value_of_line"]))
-        self.sp_line.setToolTip("Line intensity level used to synthesize sensor readings.")
-        row5.addWidget(lbl5); row5.addWidget(self.sp_line)
-        root.addLayout(row5)
-
-        row6 = QHBoxLayout()
-        lbl6 = QLabel("Value of background")
-        lbl6.setToolTip("Output value when the sensor sees the board/background (0..max based on bits).")
-        self.sp_bg = QSpinBox(); self.sp_bg.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_bg.setValue(int(params["value_of_background"]))
-        self.sp_bg.setToolTip("Background intensity level used to synthesize sensor readings.")
-        row6.addWidget(lbl6); row6.addWidget(self.sp_bg)
-        root.addLayout(row6)
-
-        row7 = QHBoxLayout()
-        lbl7 = QLabel("Analog noise line")
-        lbl7.setToolTip("Defines the random variation applied to the sensor readings when detecting the line. Used only in analog mode.")
-        self.sp_noise_lo = QSpinBox(); self.sp_noise_lo.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_noise_lo.setValue(int(params.get("analog_noise_line", 0)))
-        self.sp_noise_lo.setToolTip("Maximum amplitude of noise affecting line readings (0 means no noise).")
-        row7.addWidget(lbl7); row7.addWidget(self.sp_noise_lo)
-        root.addLayout(row7)
-
-        row8 = QHBoxLayout()
-        lbl8 = QLabel("Analog noise background")
-        lbl8.setToolTip("Defines the random variation applied to the sensor readings when detecting the background area. Used only in analog mode.")
-        self.sp_noise_hi = QSpinBox(); self.sp_noise_hi.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_noise_hi.setValue(int(params.get("analog_noise_background", 0)))
-        self.sp_noise_hi.setToolTip("Maximum amplitude of noise affecting background readings (0 means no noise).")
-        row8.addWidget(lbl8); row8.addWidget(self.sp_noise_hi)
-        root.addLayout(row8)
-
-        self.sp_bits.valueChanged.connect(_apply_bit_ranges)
-        _apply_bit_ranges()
-        self.combo_sensor.currentIndexChanged.connect(lambda _: _apply_mode_enabling())
-        _apply_mode_enabling()
-
-        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
-        btns.accepted.connect(self._on_save)
-        btns.rejected.connect(self.reject)
-        root.addWidget(btns)
-
-    def _on_save(self):
-        data = {
-            "final_linear_speed_mps": float(self.ed_vf.value()),
-            "motor_time_constant_s":  float(self.ed_tau.value()),
-            "simulation_step_dt_ms": float(self.ed_dt.value()),
-            "sensor_mode":            str(self.combo_sensor.currentText()).lower(),
-            "sensor_bits":            int(self.sp_bits.value()),
-            "value_of_line":          int(self.sp_line.value()),
-            "value_of_background":    int(self.sp_bg.value()),
-            "analog_noise_line":       int(self.sp_noise_lo.value()),
-            "analog_noise_background":      int(self.sp_noise_hi.value())
-        }
-        save_sim_params(data)
-        self.accept()
-
 @dataclass(slots=True)
 class Envelope:
     """Robot outer rectangle (width × height) used for collisions and drawing."""
@@ -837,6 +668,73 @@ def rect_rect_overlap_area(R1, R2):
     """Compute overlap area between two rectangles by polygon clipping."""
     poly = suth_hodg_clip(R1, R2)
     return poly_area(poly)
+
+def derive_params_from_robot(robot_spec: dict) -> dict:
+    """Derive simulator parameters from the robot-spec JSON.
+
+    - final_linear_speed_mps: computed from NoLoadRPM, gear ratio, efficiency and wheel radius.
+    - motor_time_constant_s: default to 0.010 s if not derivable.
+    - simulation_step_dt_ms: read from controller.simulation_step_dt_ms (default 1.0 ms).
+    - sensor settings: read from sensorsConfig with safe defaults.
+    """
+    try:
+        motor = robot_spec.get("motor_transmission", {}) or {}
+        geom  = robot_spec.get("geometric_mechanical", {}) or {}
+        ctrl  = robot_spec.get("controller", {}) or {}
+        sens  = robot_spec.get("sensorsConfig", {}) or {}
+
+        wheel_r_mm = float(geom.get("wheel_radius_mm", 11.0))
+        rpm        = float(motor.get("NoLoadRPM", 10000.0))
+        gear       = float(motor.get("gear_ratio", 1.0)) or 1.0
+        eta        = float(motor.get("eta", 1.0)) or 1.0
+
+        wheel_rps  = (rpm / gear) / 60.0
+        v_mps = wheel_rps * (2.0 * math.pi * (wheel_r_mm / 1000.0)) * eta
+        v_mps = max(0.1, min(20.0, float(v_mps)))
+
+        dt_ms = float(ctrl.get("simulation_step_dt_ms", 1.0))
+
+        tau_s = 0.010
+        try:
+            Rm = float(motor.get("R_motor_ohm", 0.0))
+            Kt = float(motor.get("Kt_Nm_per_A", 0.0))
+            Jm = float(motor.get("J_motor_kgm2", 0.0)) + float(motor.get("J_load_kgm2", 0.0))
+            if Rm > 0.0 and Kt > 0.0 and Jm > 0.0:
+                tau_s = max(0.002, min(0.100, (Rm * Jm) / (Kt * Kt)))
+        except Exception:
+            pass
+
+        sensor_mode = str(sens.get("sensor_mode", "analog")).lower()
+        sensor_bits = int(sens.get("sensor_bits", 8))
+        value_of_line = int(sens.get("value_of_line", 0))
+        value_of_background = int(sens.get("value_of_background", 255))
+        analog_noise_line = int(sens.get("analog_noise_line", 0))
+        analog_noise_background = int(sens.get("analog_noise_background", 0))
+
+        return {
+            "final_linear_speed_mps": v_mps,
+            "motor_time_constant_s":  tau_s,
+            "simulation_step_dt_ms":  dt_ms,
+            "sensor_mode":            sensor_mode,
+            "sensor_bits":            sensor_bits,
+            "value_of_line":          value_of_line,
+            "value_of_background":    value_of_background,
+            "analog_noise_line":      analog_noise_line,
+            "analog_noise_background": analog_noise_background
+        }
+    except Exception:
+        return {
+            "final_linear_speed_mps": 2.0,
+            "motor_time_constant_s":  0.010,
+            "simulation_step_dt_ms":  1.0,
+            "sensor_mode":            "analog",
+            "sensor_bits":            8,
+            "value_of_line":          0,
+            "value_of_background":    255,
+            "analog_noise_line":      50,
+            "analog_noise_background": 50
+        }
+
 
 class SimWorker(QThread):
     """Background thread that runs the physics loop and streams steps to the UI."""
@@ -1206,6 +1104,7 @@ class MainWindow(QMainWindow):
         controls = QWidget(); form = QFormLayout(controls)
 
         self.anim_interval_ms = 42
+        self.sim_dt_s = 0.001
         self.stream_draw_interval_ms = 200
         self._last_stream_draw_ns = 0
         self.streaming = False
@@ -1221,6 +1120,7 @@ class MainWindow(QMainWindow):
 
         self.controller_path = None
         self.robot_path = None
+        self.robot_data_raw = {}
         self.track_path = None
         self.lbl_ctrl_status = QLabel("—")
         self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
@@ -1231,17 +1131,6 @@ class MainWindow(QMainWindow):
         self.btn_robot.setToolTip("Select a robot description (.json).")
         self.btn_ctrl  = QPushButton("Load controller (.py)")
         self.btn_ctrl.setToolTip("Select a Python file implementing control_step(state).")
-        self.btn_params = QPushButton("Simulation parameters")
-        self.btn_params.setToolTip("Open a dialog to edit and persist simulation parameters to simulation_parameters.json.")
-        self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
-        self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 0.100); self.spin_tau.setDecimals(3); self.spin_tau.setSingleStep(0.001); self.spin_tau.setValue(0.010)
-
-        self.spin_dt  = QDoubleSpinBox()
-        self.spin_dt.setRange(0.5, 100.0)
-        self.spin_dt.setDecimals(1)
-        self.spin_dt.setSingleStep(0.5)
-        self.spin_dt.setValue(1.0)
-        self.sim_dt_s = float(self.spin_dt.value()) / 1000.0
 
         self.btn_sim   = QPushButton("Start")
         self.btn_sim.setToolTip("Start a new simulation with the currently loaded track, robot and controller.")
@@ -1265,9 +1154,6 @@ class MainWindow(QMainWindow):
 
         form.addRow(QLabel("<b>Simulation Files</b>"))
 
-        form.addRow(self.btn_params)
-
-        # Controller row: button + status
         self.lbl_ctrl_status = QLabel("—")
         self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
         self.lbl_ctrl_status.setToolTip("Loaded controller file.")
@@ -1277,7 +1163,6 @@ class MainWindow(QMainWindow):
         row_ctrl_layout.addWidget(self.lbl_ctrl_status)
         form.addRow(row_ctrl)
 
-        # Robot row: button + status
         self.lbl_robot_status = QLabel("—")
         self.lbl_robot_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
         self.lbl_robot_status.setToolTip("Loaded robot file.")
@@ -1336,7 +1221,6 @@ class MainWindow(QMainWindow):
         replay_ctrl_layout.addWidget(self.btn_track_robot)
         form.addRow(replay_ctrl_row)
 
-        self.btn_params.clicked.connect(self.on_open_params)
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(False)
         self.is_replaying = False
@@ -1375,10 +1259,8 @@ class MainWindow(QMainWindow):
         self.btn_replay_stop.setEnabled(False)
         self.update_replay_buttons()
 
-        self.spin_dt.valueChanged.connect(self._refresh_title)
+        self.setWindowTitle(f"Line-Follower Simulator")
 
-
-        # Replay state flag
         self.is_replaying = False
 
     def update_replay_buttons(self):
@@ -1386,27 +1268,6 @@ class MainWindow(QMainWindow):
         has_steps = bool(self.anim_steps)
         self.btn_replay.setEnabled(has_steps and not self.is_replaying and not self.streaming)
         self.btn_replay_stop.setEnabled(self.is_replaying)
-        self._refresh_title()
-
-    def on_open_params(self):
-        """Open the parameters dialog, then refresh spin boxes and window title."""
-        dlg = SimulationParamsDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            p = load_sim_params()
-            self.spin_vf.setValue(float(p["final_linear_speed_mps"]))
-            self.spin_tau.setValue(float(p["motor_time_constant_s"]))
-            self.spin_dt.setValue(float(p["simulation_step_dt_ms"]))
-            self.sim_dt_s = float(p["simulation_step_dt_ms"]) / 1000.0
-            self._refresh_title()
-            QMessageBox.information(self, "Simulation parameters", "Parameters saved to simulation_parameters.json")
-            try:
-                self.on_speed_change(self.combo_speed.currentIndex())
-            except Exception:
-                pass
-
-    def _refresh_title(self):
-        """Show the current dt (ms) in the window title for quick reference."""
-        self.setWindowTitle(f"Line-Follower Simulator (dt = {self.sim_dt_s*1000.0:.1f} ms)")
 
     def _draw_robot_at_initial_pose(self):
         """Draw the robot body/wheels/sensors at the initial pose onto the scene."""
@@ -1494,7 +1355,9 @@ class MainWindow(QMainWindow):
         if not path: return
         try:
             with open(path, "r", encoding="utf-8") as f:
-                self.robot = robot_from_json(json.load(f))
+                _raw = json.load(f)
+                self.robot_data_raw = _raw
+                self.robot = robot_from_json(_raw)
             self.robot_path = path
             base = os.path.basename(path)
             self.statusBar().showMessage(f"Robot: {base}", 5000)
@@ -1582,7 +1445,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "robot_path", None):
             try:
                 with open(self.robot_path, "r", encoding="utf-8") as f:
-                    self.robot = robot_from_json(json.load(f))
+                    _raw = json.load(f)
+                    self.robot_data_raw = _raw
+                    self.robot = robot_from_json(_raw)
                 if self.track:
                     self.draw_robot_outline_preview()
                 base = os.path.basename(self.robot_path)
@@ -1773,7 +1638,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.btn_replay.setEnabled(False)
 
-        p = load_sim_params()
+        p = derive_params_from_robot(getattr(self, 'robot_data_raw', {}) or {})
         self.v_max_mm_s = float(p.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.sim_dt_s = max(0.0005, min(0.1, float(p.get("simulation_step_dt_ms", 1.0)) / 1000.0))
 
