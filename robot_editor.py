@@ -15,7 +15,8 @@ from typing import Optional, Tuple
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QGraphicsScene, QGraphicsView, QFormLayout,
     QVBoxLayout, QHBoxLayout, QLabel, QDoubleSpinBox, QPushButton, QListWidget,
-    QListWidgetItem, QFileDialog, QMessageBox, QSplitter, QCheckBox, QInputDialog, QGridLayout
+    QListWidgetItem, QFileDialog, QMessageBox, QSplitter, QCheckBox, QInputDialog, QGridLayout,
+    QDialog
 )
 from PySide6.QtGui import QPen, QColor, QAction, QPainter, QKeyEvent
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal, QTimer
@@ -27,6 +28,70 @@ from Utils.robot_geometry import (
 from Utils.robot_model import RobotModel, Wheel, Sensor
 
 TAPE_THICKNESS_MM = 20.0
+
+class ElectricalDialog(QDialog):
+    """Modal dialog to capture basic electrical parameters (battery and motor).
+    Values are written back into the provided model on accept()."""
+    def __init__(self, model: RobotModel, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Electrical parameters")
+        self.model = model
+
+        form = QFormLayout(self)
+
+        self.spin_batt_v = QDoubleSpinBox()
+        self.spin_batt_v.setRange(0.1, 60.0)
+        self.spin_batt_v.setDecimals(2)
+        self.spin_batt_v.setSuffix(" V")
+        self.spin_batt_v.setToolTip("Battery nominal voltage in Volts.")
+        self.spin_batt_cap = QDoubleSpinBox()
+        self.spin_batt_cap.setRange(1.0, 20000.0)
+        self.spin_batt_cap.setDecimals(0)
+        self.spin_batt_cap.setSuffix(" mAh")
+        self.spin_batt_cap.setToolTip("Battery capacity in milliamp-hours.")
+
+        self.spin_motor_rpm = QDoubleSpinBox()
+        self.spin_motor_rpm.setRange(1.0, 100000.0)
+        self.spin_motor_rpm.setDecimals(0)
+        self.spin_motor_rpm.setSuffix(" rpm")
+        self.spin_motor_rpm.setToolTip("Motor no-load RPM at battery voltage.")
+        self.spin_motor_i = QDoubleSpinBox()
+        self.spin_motor_i.setRange(0.01, 100.0)
+        self.spin_motor_i.setDecimals(2)
+        self.spin_motor_i.setSuffix(" A")
+        self.spin_motor_i.setToolTip("Estimated max current per motor (Amps).")
+
+        bv = getattr(self.model, "batteryVoltageV", 7.4)
+        bc = getattr(self.model, "batteryCapacitymAh", 850.0)
+        mr = getattr(self.model, "motorNoLoadRPM", 10000.0)
+        mi = getattr(self.model, "motorMaxCurrentA", 1.00)
+        self.spin_batt_v.setValue(float(bv))
+        self.spin_batt_cap.setValue(float(bc))
+        self.spin_motor_rpm.setValue(float(mr))
+        self.spin_motor_i.setValue(float(mi))
+
+        form.addRow(QLabel("<b>Battery</b>"))
+        form.addRow("Voltage", self.spin_batt_v)
+        form.addRow("Capacity", self.spin_batt_cap)
+        form.addRow(QLabel("<b>Motor</b>"))
+        form.addRow("No-load RPM", self.spin_motor_rpm)
+        form.addRow("Max current", self.spin_motor_i)
+
+        btns = QHBoxLayout()
+        self.btn_ok = QPushButton("OK")
+        self.btn_cancel = QPushButton("Cancel")
+        btns.addWidget(self.btn_ok); btns.addWidget(self.btn_cancel)
+        form.addRow(btns)
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def accept(self):
+        """Copy values to model and close."""
+        self.model.batteryVoltageV = float(self.spin_batt_v.value())
+        self.model.batteryCapacitymAh = float(self.spin_batt_cap.value())
+        self.model.motorNoLoadRPM = float(self.spin_motor_rpm.value())
+        self.model.motorMaxCurrentA = float(self.spin_motor_i.value())
+        super().accept()
 
 class RobotScene(QGraphicsScene):
     """QGraphicsScene that draws the robot, grid, and selection.
@@ -44,6 +109,12 @@ It emits signals when the selection or origin changes for the UI to update."""
 
         self.selected_kind: Optional[str] = None
         self.selected_id: Optional[str] = None
+
+    def wheel_w(self) -> float:
+        return float(getattr(self.model, "wheelWidthMM", DEFAULT_WHEEL_W if 'DEFAULT_WHEEL_W' in globals() else 22.0))
+
+    def wheel_h(self) -> float:
+        return float(getattr(self.model, "wheelHeightMM", DEFAULT_WHEEL_H if 'DEFAULT_WHEEL_H' in globals() else 15.0))
 
     def mousePressEvent(self, event):
         """Handle mouse clicks. Left-click selects wheels/sensors; right-click moves the origin (0,0)."""
@@ -73,10 +144,12 @@ It emits signals when the selection or origin changes for the UI to update."""
         super().mousePressEvent(event)
 
     def _hit_test(self, p: QPointF) -> Optional[Tuple[str, str]]:
+        ww = self.wheel_w()
+        wh = self.wheel_h()
         for w in self.model.wheels:
             x = self.center_scene.x() + w.xMM
             y = self.center_scene.y() + w.yMM
-            if (abs(p.x() - x) <= DEFAULT_WHEEL_W/2.0) and (abs(p.y() - y) <= DEFAULT_WHEEL_H/2.0):
+            if (abs(p.x() - x) <= ww/2.0) and (abs(p.y() - y) <= wh/2.0):
                 return ("wheel", w.id)
         for s in self.model.sensors:
             x = self.center_scene.x() + s.xMM
@@ -85,7 +158,6 @@ It emits signals when the selection or origin changes for the UI to update."""
                 return ("sensor", s.id)
         return None
 
-    # ---- render ----
     def drawBackground(self, painter: QPainter, rect):
         """Draw a dark grid to help the user align parts."""
         super().drawBackground(painter, rect)
@@ -129,21 +201,19 @@ It emits signals when the selection or origin changes for the UI to update."""
         self.addLine(ox-8, oy, ox+8, oy, o_pen)
         self.addLine(ox, oy-8, ox, oy+8, o_pen)
 
+        ww = self.wheel_w()
+        wh = self.wheel_h()
         for w in self.model.wheels:
             x = c.x() + w.xMM
             y = c.y() + w.yMM
             pen = QPen(QColor("#000000"), 1)
             brush = QColor("#dddddd")
             self.addRect(
-                x-DEFAULT_WHEEL_W/2.0, y-DEFAULT_WHEEL_H/2.0,
-                DEFAULT_WHEEL_W, DEFAULT_WHEEL_H, pen, brush
+                x-ww/2.0, y-wh/2.0, ww, wh, pen, brush
             )
             if self.selected_kind == "wheel" and self.selected_id == w.id:
                 sel_pen = QPen(QColor("#00E5FF"), 2)
-                self.addRect(
-                    x-DEFAULT_WHEEL_W/2.0, y-DEFAULT_WHEEL_H/2.0,
-                    DEFAULT_WHEEL_W, DEFAULT_WHEEL_H, sel_pen
-                )
+                self.addRect(x-ww/2.0, y-wh/2.0, ww, wh, sel_pen)
 
         for s in self.model.sensors:
             x = c.x() + s.xMM
@@ -177,6 +247,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Robot Editor (Python/PySide6)")
 
         self.model = RobotModel()
+
+        if not hasattr(self.model, "wheelWidthMM"):  self.model.wheelWidthMM = 22.0
+        if not hasattr(self.model, "wheelHeightMM"): self.model.wheelHeightMM = 15.0
+        if not hasattr(self.model, "batteryVoltageV"):     self.model.batteryVoltageV = 7.4
+        if not hasattr(self.model, "batteryCapacitymAh"):  self.model.batteryCapacitymAh = 850.0
+        if not hasattr(self.model, "motorNoLoadRPM"):      self.model.motorNoLoadRPM = 10000.0
+        if not hasattr(self.model, "motorMaxCurrentA"):    self.model.motorMaxCurrentA = 1.0
+
         self.scene = RobotScene(self.model)
         self.view = RobotView(self.scene)
         self.view.setSceneRect(0, 0, 1600, 1000)
@@ -193,7 +271,7 @@ class MainWindow(QMainWindow):
         )
         grid_hint = "Grid spacing used for snapping sensors and position alignment."
 
-        envelope_title = QLabel("<b>Envelope (limit 250 x 250 mm)</b>")
+        envelope_title = QLabel("<b>Envelope</b>")
         envelope_title.setToolTip(envelope_hint)
         form.addRow(envelope_title)
 
@@ -215,17 +293,22 @@ class MainWindow(QMainWindow):
         self.spin_grid.setSuffix(" mm")
         self.spin_grid.setToolTip(grid_hint)
 
-        form.addRow("Width (mm)", self.spin_env_w)
-        form.addRow("Height (mm)", self.spin_env_h)
-        form.addRow("Grid (mm)", self.spin_grid)
+        env_grid = QGridLayout()
+        env_grid.setHorizontalSpacing(8)
+        env_grid.addWidget(QLabel("Width"), 0, 0)
+        env_grid.addWidget(QLabel("Height"), 0, 1)
+        env_grid.addWidget(QLabel("Grid"), 0, 2)
+        env_grid.addWidget(self.spin_env_w, 1, 0)
+        env_grid.addWidget(self.spin_env_h, 1, 1)
+        env_grid.addWidget(self.spin_grid, 1, 2)
+        env_widget = QWidget()
+        env_widget.setLayout(env_grid)
+        form.addRow(env_widget)
 
-        origin_title = QLabel("<b>Origin (0,0) — position relative to the center of the envelope</b>")
         origin_hint = (
             "The <b>Origin</b> defines the <b>X,Y position of the robot in the simulation</b>.\n"
             "Right-click on the canvas to move the origin or use the fields below."
         )
-        origin_title.setToolTip(origin_hint)
-        form.addRow(origin_title)
 
         self.spin_origin_x = QDoubleSpinBox()
         self.spin_origin_x.setRange(-10000, 10000)
@@ -240,8 +323,8 @@ class MainWindow(QMainWindow):
         self.spin_origin_y.setToolTip(origin_hint)
 
         origin_grid = QGridLayout()
-        origin_grid.addWidget(QLabel("Origin X (mm)"), 0, 0)
-        origin_grid.addWidget(QLabel("Origin Y (mm)"), 0, 1)
+        origin_grid.addWidget(QLabel("Origin X"), 0, 0)
+        origin_grid.addWidget(QLabel("Origin Y"), 0, 1)
         origin_grid.addWidget(self.spin_origin_x, 1, 0)
         origin_grid.addWidget(self.spin_origin_y, 1, 1)
         origin_widget = QWidget()
@@ -253,11 +336,6 @@ class MainWindow(QMainWindow):
             "Set the origin exactly at the midpoint between the left and right wheel centers."
         )
         form.addRow(self.btn_origin_mid_wheels)
-
-        wheels_hint = "Position of each wheel center relative to the robot’s origin (in mm)."
-        wheels_title = QLabel("<b>Wheels (22 x 15 mm)</b>")
-        wheels_title.setToolTip(wheels_hint)
-        form.addRow(wheels_title)
 
         self.spin_wl_x = QDoubleSpinBox()
         self.spin_wl_x.setRange(-10000, 10000)
@@ -279,17 +357,32 @@ class MainWindow(QMainWindow):
         self.spin_wr_y.setSuffix(" mm")
         self.spin_wr_y.setToolTip("Right wheel Y position relative to the origin (mm).")
 
+        self.spin_wheel_w = QDoubleSpinBox()
+        self.spin_wheel_w.setRange(1.0, 200.0)
+        self.spin_wheel_w.setValue(float(getattr(self.model, "wheelWidthMM", 22.0)))
+        self.spin_wheel_w.setSuffix(" mm")
+        self.spin_wheel_w.setToolTip("Wheel rectangle width (X) in mm. Default 22.")
+
+        self.spin_wheel_h = QDoubleSpinBox()
+        self.spin_wheel_h.setRange(1.0, 200.0)
+        self.spin_wheel_h.setValue(float(getattr(self.model, "wheelHeightMM", 15.0)))
+        self.spin_wheel_h.setSuffix(" mm")
+        self.spin_wheel_h.setToolTip("Wheel rectangle height (Y) in mm. Default 15.")
+
         wheels_grid = QGridLayout()
         wheels_grid.setHorizontalSpacing(8)
-        wheels_grid.addWidget(QLabel(""), 0, 0)
-        wheels_grid.addWidget(QLabel("X (mm)"), 0, 1)
-        wheels_grid.addWidget(QLabel("Y (mm)"), 0, 2)
+        wheels_grid.addWidget(QLabel("<b>Wheels</b>"), 0, 0)
+        wheels_grid.addWidget(QLabel("X"), 0, 1)
+        wheels_grid.addWidget(QLabel("Y"), 0, 2)
         wheels_grid.addWidget(QLabel("Left"), 1, 0)
         wheels_grid.addWidget(self.spin_wl_x, 1, 1)
         wheels_grid.addWidget(self.spin_wl_y, 1, 2)
         wheels_grid.addWidget(QLabel("Right"), 2, 0)
         wheels_grid.addWidget(self.spin_wr_x, 2, 1)
         wheels_grid.addWidget(self.spin_wr_y, 2, 2)
+        wheels_grid.addWidget(QLabel("Size"), 3, 0)
+        wheels_grid.addWidget(self.spin_wheel_w, 3, 1)
+        wheels_grid.addWidget(self.spin_wheel_h, 3, 2)
         wheels_widget = QWidget()
         wheels_widget.setLayout(wheels_grid)
         form.addRow(wheels_widget)
@@ -327,9 +420,21 @@ class MainWindow(QMainWindow):
         self.chk_snap = QCheckBox("Snap to grid (uses Grid mm)")
         self.chk_snap.setToolTip("When enabled, sensor coordinates snap to the defined grid step.")
 
-        form.addRow("Sensor X (mm)", self.spin_s_x)
-        form.addRow("Sensor Y (mm)", self.spin_s_y)
+        # Place Sensor X and Sensor Y on a single row (labels on top, fields below).
+        sensor_xy_grid = QGridLayout()
+        sensor_xy_grid.setHorizontalSpacing(8)
+        sensor_xy_grid.addWidget(QLabel("Sensor X"), 0, 0)
+        sensor_xy_grid.addWidget(QLabel("Sensor Y"), 0, 1)
+        sensor_xy_grid.addWidget(self.spin_s_x, 1, 0)
+        sensor_xy_grid.addWidget(self.spin_s_y, 1, 1)
+        sensor_xy_widget = QWidget()
+        sensor_xy_widget.setLayout(sensor_xy_grid)
+        form.addRow(sensor_xy_widget)
+
         form.addRow(self.chk_snap)
+
+        self.btn_elec   = QPushButton("Electrical parameters…"); self.btn_elec.setToolTip("Open a dialog to edit battery/motor parameters. These are saved to JSON.")
+        form.addRow(self.btn_elec)
 
         file_hint = "Import or export robot configuration files, or fit the view to the current layout."
         files_row = QHBoxLayout()
@@ -360,6 +465,9 @@ class MainWindow(QMainWindow):
         self.spin_origin_y.valueChanged.connect(self.on_origin_change)
         self.btn_origin_mid_wheels.clicked.connect(self.on_origin_from_mid_wheels)
 
+        self.spin_wheel_w.valueChanged.connect(self.on_wheel_size_change)
+        self.spin_wheel_h.valueChanged.connect(self.on_wheel_size_change)
+
         self.spin_wl_x.valueChanged.connect(self.on_wheel_change)
         self.spin_wl_y.valueChanged.connect(self.on_wheel_change)
         self.spin_wr_x.valueChanged.connect(self.on_wheel_change)
@@ -375,6 +483,7 @@ class MainWindow(QMainWindow):
         self.btn_import.clicked.connect(self.on_import)
         self.btn_export.clicked.connect(self.on_export)
         self.btn_fit.clicked.connect(self.on_fit)
+        self.btn_elec.clicked.connect(self.on_open_electrical)
 
         self.refresh_all()
         self.scene.rebuild()
@@ -441,6 +550,12 @@ class MainWindow(QMainWindow):
         self.spin_origin_x.blockSignals(False); self.spin_origin_y.blockSignals(False)
         self.scene.rebuild()
 
+    def on_wheel_size_change(self):
+        """Update wheel rectangle width/height and redraw."""
+        self.model.wheelWidthMM = float(self.spin_wheel_w.value())
+        self.model.wheelHeightMM = float(self.spin_wheel_h.value())
+        self.scene.rebuild()
+
     def on_wheel_change(self):
         """Save wheel positions from the spin boxes and redraw the scene."""
         wl = self.model.find_wheel("left")
@@ -470,12 +585,30 @@ class MainWindow(QMainWindow):
         self.scene.rebuild()
 
     def on_del_sensor(self):
-        """Delete the currently selected sensor from the list."""
+        """Delete the currently selected sensor from the list.
+        After deletion, automatically select the last remaining sensor (if any)
+        so the user can keep pressing Delete to remove all without reselecting."""
         sid = self.current_sensor_id()
-        if sid is None: return
+        if sid is None:
+            return
+        # Remove from model
         self.model.remove_sensor(sid)
+        # Refresh UI list
         self.refresh_sensors_list()
-        self.scene.selected_kind, self.scene.selected_id = None, None
+        # If there are sensors left, select the last one; otherwise clear selection/fields
+        count = self.list_sensors.count()
+        if count > 0:
+            last_row = count - 1
+            self.list_sensors.setCurrentRow(last_row)
+            # Ensure scene selection and fields reflect the new current item
+            new_sid = self.list_sensors.item(last_row).data(Qt.UserRole)
+            self.scene.selected_kind, self.scene.selected_id = "sensor", new_sid
+            # Sync fields for the selected sensor
+            self.on_select_sensor(last_row)
+        else:
+            # No sensors left: clear selection and fields
+            self.scene.selected_kind, self.scene.selected_id = None, None
+            self.refresh_sensors_fields()
         self.scene.rebuild()
 
     def on_select_sensor(self, row: int):
@@ -591,13 +724,27 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
 
     def on_import(self):
-        """Load a robot definition from a JSON file and refresh the UI."""
+        """Load a robot definition from a JSON file and refresh the UI.
+        Also loads optional 'wheelSizeMM' and 'electrical' sections."""
         path, _ = QFileDialog.getOpenFileName(self, "Import robot", "", "JSON (*.json)")
         if not path: return
         try:
             with open(path, "r", encoding="utf-8") as f:
                 obj = json.load(f)
             self.model = RobotModel.from_json(obj)
+            if not hasattr(self.model, "wheelWidthMM"):  self.model.wheelWidthMM = 22.0
+            if not hasattr(self.model, "wheelHeightMM"): self.model.wheelHeightMM = 15.0
+            ws = obj.get("wheelSizeMM") or obj.get("wheel_size_mm")
+            if isinstance(ws, dict):
+                self.model.wheelWidthMM = float(ws.get("x", self.model.wheelWidthMM))
+                self.model.wheelHeightMM = float(ws.get("y", self.model.wheelHeightMM))
+
+            elec = obj.get("electrical", {})
+            self.model.batteryVoltageV   = float(elec.get("batteryVoltageV", getattr(self.model, "batteryVoltageV", 7.4)))
+            self.model.batteryCapacitymAh= float(elec.get("batteryCapacitymAh", getattr(self.model, "batteryCapacitymAh", 850.0)))
+            self.model.motorNoLoadRPM    = float(elec.get("motorNoLoadRPM", getattr(self.model, "motorNoLoadRPM", 10000.0)))
+            self.model.motorMaxCurrentA  = float(elec.get("motorMaxCurrentA", getattr(self.model, "motorMaxCurrentA", 1.0)))
+
             self.scene.model = self.model
             self.refresh_all()
             self.scene.selected_kind, self.scene.selected_id = None, None
@@ -606,14 +753,33 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to import:\n{e}")
 
     def on_export(self):
-        """Save the current robot definition to a JSON file."""
+        """Save the current robot definition to a JSON file.
+        Exports 'wheelSizeMM' and an 'electrical' block along with the base model."""
         path, _ = QFileDialog.getSaveFileName(self, "Export robot", "robot-spec.json", "JSON (*.json)")
         if not path: return
         try:
+            data = self.model.to_json()
+            # Inject our additional fields without requiring RobotModel changes.
+            data["wheelSizeMM"] = {
+                "x": float(getattr(self.model, "wheelWidthMM", 22.0)),
+                "y": float(getattr(self.model, "wheelHeightMM", 15.0)),
+            }
+            data["electrical"] = {
+                "batteryVoltageV":   float(getattr(self.model, "batteryVoltageV", 7.4)),
+                "batteryCapacitymAh":float(getattr(self.model, "batteryCapacitymAh", 850.0)),
+                "motorNoLoadRPM":    float(getattr(self.model, "motorNoLoadRPM", 10000.0)),
+                "motorMaxCurrentA":  float(getattr(self.model, "motorMaxCurrentA", 1.0)),
+            }
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.model.to_json(), f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export:\n{e}")
+
+    def on_open_electrical(self):
+        """Open the electrical parameters dialog and apply changes if accepted."""
+        dlg = ElectricalDialog(self.model, self)
+        if dlg.exec() == QDialog.Accepted:
+            pass
 
     def refresh_all(self):
         """Refresh all form sections from the model (envelope, origin, wheels, sensors)."""
@@ -627,6 +793,11 @@ class MainWindow(QMainWindow):
         self.spin_origin_x.setValue(self.model.originXMM)
         self.spin_origin_y.setValue(self.model.originYMM)
         self.spin_origin_x.blockSignals(False); self.spin_origin_y.blockSignals(False)
+
+        self.spin_wheel_w.blockSignals(True); self.spin_wheel_h.blockSignals(True)
+        self.spin_wheel_w.setValue(float(getattr(self.model, "wheelWidthMM", 22.0)))
+        self.spin_wheel_h.setValue(float(getattr(self.model, "wheelHeightMM", 15.0)))
+        self.spin_wheel_w.blockSignals(False); self.spin_wheel_h.blockSignals(False)
 
         self.refresh_wheels_fields()
         self.refresh_sensors_list()
