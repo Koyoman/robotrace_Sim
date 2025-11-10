@@ -1267,10 +1267,15 @@ class MainWindow(QMainWindow):
 
         self.btn_replay_stop = QPushButton("Stop")
         self.btn_replay_stop.setToolTip("Stop the current replay playback.")
+        self.btn_track_robot = QPushButton("Track robot")
+        self.btn_track_robot.setToolTip("Keep the view centered on the robot during replay.")
+        self.btn_track_robot.setCheckable(True)
+        self.btn_track_robot.setChecked(False)
         replay_ctrl_row = QWidget()
         replay_ctrl_layout = QHBoxLayout(replay_ctrl_row); replay_ctrl_layout.setContentsMargins(0,0,0,0)
         replay_ctrl_layout.addWidget(self.btn_replay)
         replay_ctrl_layout.addWidget(self.btn_replay_stop)
+        replay_ctrl_layout.addWidget(self.btn_track_robot)
         form.addRow(replay_ctrl_row)
 
         self.btn_params.clicked.connect(self.on_open_params)
@@ -1911,6 +1916,13 @@ class MainWindow(QMainWindow):
         h = float(step.get("heading_deg", 0.0))
         v_now = float(step.get("v_mm_s", 0.0))
         ang = rad(h)
+        if hasattr(self, "btn_track_robot") and self.btn_track_robot.isChecked():
+            try:
+                self.view.centerOn(x, y)
+            except Exception:
+                pass
+        if hasattr(self, 'btn_track_robot'):
+            self.btn_track_robot.setEnabled(bool(self.anim_steps) and not self.streaming)
 
         if self._trail_last_pt is None:
             self._trail_last_pt = (x, y)
