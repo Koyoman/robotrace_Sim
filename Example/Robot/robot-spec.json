@@ -110,7 +110,8 @@
     "pwm_frequency_Hz": 20000.0,
     "deadband_percent": 0.0,
     "pwm_max": 4095,
-    "pwm_min": -4095
+    "pwm_min": -4095,
+    "simulation_step_dt_ms": 1.0
   },
   "sensorsConfig": {
     "sensor_mode": "analog",

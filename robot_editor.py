@@ -138,6 +138,11 @@ class ElectricalDialog(QDialog):
         self.sp_pwm_min.setValue(int(getattr(self.model, "motorPwmMin", -4095)))
         lbl_pwm_min = QLabel("PWM min"); lbl_pwm_min.setToolTip(self.sp_pwm_min.toolTip())
         form_ctrl.addRow(lbl_pwm_min, self.sp_pwm_min)
+        self.sp_sim_dt_ms = QDoubleSpinBox(); self.sp_sim_dt_ms.setRange(0.5, 10000.0); self.sp_sim_dt_ms.setDecimals(1); self.sp_sim_dt_ms.setSuffix(" ms")
+        self.sp_sim_dt_ms.setToolTip("Fixed simulation integrator step in milliseconds. Smaller steps improve accuracy but increase compute cost. Typical: 1.0 ms.")
+        self.sp_sim_dt_ms.setValue(float(getattr(self.model, "simulationStepDtMs", 1.0)))
+        lbl_sim_dt = QLabel("Simulation step (ms)"); lbl_sim_dt.setToolTip(self.sp_sim_dt_ms.toolTip())
+        form_ctrl.addRow(lbl_sim_dt, self.sp_sim_dt_ms)
 
         tabs.addTab(tab_ctrl, "Controller")
 
@@ -578,6 +583,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self.model, "motorTimeConstantS"):    self.model.motorTimeConstantS = 0.01
         if not hasattr(self.model, "motorPwmMin"):    self.model.motorPwmMin = -4095
         if not hasattr(self.model, "motorPwmMax"):    self.model.motorPwmMax = 4095
+        if not hasattr(self.model, "simulationStepDtMs"):    self.model.simulationStepDtMs = 1.0
         if not hasattr(self.model, "JtotalKGm2"):    self.model.JtotalKGm2 = 0.0
         if not hasattr(self.model, "JloadKGm2"):    self.model.JloadKGm2 = 0.0
         if not hasattr(self.model, "JmotorKGm2"):    self.model.JmotorKGm2 = 0.0
@@ -1172,7 +1178,8 @@ class MainWindow(QMainWindow):
                 "deadband_percent":    float(getattr(self.model, "controllerDeadbandPercent", 0.0)),
                 "pwm_max":             int(getattr(self.model, "motorPwmMax", 4095)),
                 "pwm_min":             int(getattr(self.model, "motorPwmMin", -4095)),
-            }
+                "simulation_step_dt_ms": float(getattr(self.model, "simulationStepDtMs", 1.0)),
+}
 
             data["sensorsConfig"] = sensors_cfg
 
