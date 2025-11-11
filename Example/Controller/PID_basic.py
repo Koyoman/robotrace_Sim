@@ -1,136 +1,88 @@
-"""PID_basic.py — Minimal PID controller example for a line-following robot.
+"""PID_basic.py — Extremely simple line-following PID.
 
-This controller extends the basic proportional (P) idea by adding:
-- I (integral): accumulates small persistent errors to remove steady offsets.
-- D (derivative): reacts to how fast the error is changing to reduce overshoot.
-
-It reads the sensor array, computes a centroid-like lateral error, and maps the
-PID output to a left/right wheel PWM difference. The code is intentionally small
-and heavily commented for beginners.
+Steps:
+  1) Compute the centroid of the sensor array (lateral error).
+  2) Apply raw PID on that error (no normalization).
+  3) Adjust wheel speeds around SPEED_PWM.
 """
 
-# ===== Configuration constants (you can tweak these) =====
+# ---------------- Parameters ----------------
+SPEED_PWM = 1500        # Base forward PWM
 
-# Base PWM (motor power) when perfectly centered on the line.
-BASE_PWM = 2048
+KP = 200.0              # Proportional gain (tune this first)
+KI = 0.0                # Integral gain
+KD = 2.0                # Derivative gain
 
-# PID gains. Start small and increase gradually while testing.
-KP = 0.35   # proportional gain
-KI = 0.0002 # integral gain (small; integral accumulates over time)
-KD = 0.001   # derivative gain
-
-# Safe PWM range for your motors/driver.
+WEIGHT_STEP = 1.0
 PWM_MIN, PWM_MAX = -4095, 4095
-
-# Sensor "position" spacing used to compute the centroid (arbitrary units).
-WEIGHT_STEP = 1000.0
-
-# Integral clamp to avoid "windup" (integral growing too much when saturated).
-I_MIN, I_MAX = -500.0, 500.0
-
-# Default time step (seconds) in case the simulator does not provide one.
 DEFAULT_DT = 0.001
+LOST_SPIN_PWM = 600
 
-
-# ===== Internal persistent state (kept across calls) =====
+# ---------------- Internal state -------------
 _integral = 0.0
 _last_err = 0.0
 _has_last = False
 
-
-def _clamp_pwm(v: float) -> int:
-    """Clamp *v* to the allowed PWM range and return an int."""
-    if v < PWM_MIN:
-        return PWM_MIN
-    if v > PWM_MAX:
-        return PWM_MAX
+# ---------------- Helpers -------------------
+def _clamp_pwm(v):
+    if v < PWM_MIN: return PWM_MIN
+    if v > PWM_MAX: return PWM_MAX
     return int(v)
 
-
-def _weights_signed_even(n: int, step: float = WEIGHT_STEP):
-    """Return *n* lateral positions centered at zero.
-
-    Works for odd or even number of sensors:
-    - odd  (e.g., 5): [-2, -1, 0, +1, +2] * step
-    - even (e.g., 4): [-1.5, -0.5, +0.5, +1.5] * step (zero is skipped for symmetry)
-    """
-    if n <= 0:
-        return []
-
+def _weights_centered(n, step):
+    """Return n sensor positions symmetric around 0."""
+    if n <= 0: return []
     half = n // 2
     if n % 2 == 0:
         out = []
         for i in range(n):
             k = i - half
-            if i >= half:
-                k += 1  # skip zero
+            if i >= half: k += 1
             out.append(k * step)
         return out
     return [(i - half) * step for i in range(n)]
 
-
-def _centroid_error(values):
-    """Compute lateral error from sensor *values* using a weighted average.
-
-    If all sensors read ~0 (line lost), returns 0.0 to keep the robot calm.
-    """
+def _centroid(values):
+    """Weighted average of sensor values (error in sensor units)."""
     total = float(sum(values))
     if total <= 1e-12:
-        return 0.0
-    weights = _weights_signed_even(len(values), step=WEIGHT_STEP)
-    return sum(w * a for w, a in zip(weights, values)) / total
+        return None
+    w = _weights_centered(len(values), WEIGHT_STEP)
+    return sum(a * x for a, x in zip(w, values)) / total
 
-
+# ---------------- Main PID ------------------
 def control_step(state):
-    """Compute one control action from the simulator *state*.
-
-    Expected keys in *state*:
-        - "sensors": list[float] with one reading per sensor (required)
-        - "dt_s":    simulation time step in seconds (optional; DEFAULT_DT if missing)
-
-    Returns:
-        dict: motor commands {"pwm_left": int, "pwm_right": int}
-    """
+    """Compute next PWM commands."""
     global _integral, _last_err, _has_last
 
     sensors = state.get("sensors", [])
     if not sensors:
-        # Fallback: drive straight (helps during loading or if line is lost).
-        return {"pwm_left": BASE_PWM, "pwm_right": BASE_PWM}
+        # No readings → go straight slowly
+        return {"pwm_left": SPEED_PWM, "pwm_right": SPEED_PWM}
 
     dt = float(state.get("dt_s", DEFAULT_DT))
-    if dt <= 0.0:
-        dt = DEFAULT_DT
+    if dt <= 0.0: dt = DEFAULT_DT
 
-    # --- Measure error from sensors ---
-    err = _centroid_error(sensors)
+    err = _centroid(sensors)
+    if err is None:
+        # Line lost → keep moving forward gently
+        return {"pwm_left": SPEED_PWM, "pwm_right": SPEED_PWM}
 
-    # --- PID terms ---
-    # P: proportional to current error
+    # ----- PID -----
     p = KP * err
-
-    # I: accumulate error over time (with clamping to prevent windup)
-    _integral += err * dt * KI
-    if _integral < I_MIN:
-        _integral = I_MIN
-    elif _integral > I_MAX:
-        _integral = I_MAX
-    i = _integral
-
-    # D: depends on how fast error changes (finite difference)
+    _integral += err * dt
+    i = KI * _integral
     if _has_last:
-        d_raw = (err - _last_err) / dt
+        d = KD * (err - _last_err) / dt
     else:
-        d_raw = 0.0
+        d = 0.0
         _has_last = True
-    d = KD * d_raw
     _last_err = err
 
-    # Combined steering command; sign convention matches _centroid_error.
-    steer = p + i + d
+    u = p + i + d  # steering correction (raw units)
 
-    # Map steering into left/right PWM. Turning right = slow left, speed up right.
-    pwm_left = _clamp_pwm(BASE_PWM - steer)
-    pwm_right = _clamp_pwm(BASE_PWM + steer)
+    # ----- Map to wheel speeds -----
+    left = _clamp_pwm(SPEED_PWM - u)
+    right = _clamp_pwm(SPEED_PWM + u)
 
-    return {"pwm_left": pwm_left, "pwm_right": pwm_right}
+    return {"pwm_left": left, "pwm_right": right}

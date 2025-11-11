@@ -173,48 +173,6 @@ LINESIM_API void poly_copy_from_xy(const double* xs, const double* ys, int n, Pt
     for (int i=0;i<n;i++){ out[i].x = xs[i]; out[i].y = ys[i]; }
 }
 
-LINESIM_API void step_dynamics_C(
-    double x, double y, double heading_deg,
-    double vL, double vR,
-    int pwmL, int pwmR,
-    double v_final, double tau, double trackW, double dt_s,
-    double* out_x, double* out_y, double* out_heading_deg,
-    double* out_vL, double* out_vR,
-    double* out_v, double* out_w)
-{
-    if (tau < 1e-9) tau = 1e-9;
-    if (trackW < 1e-9) trackW = 1e-9;
-    if (dt_s < 0.0) dt_s = 0.0;
-
-    if (pwmL > 4095) pwmL = 4095; else if (pwmL < -4095) pwmL = -4095;
-    if (pwmR > 4095) pwmR = 4095; else if (pwmR < -4095) pwmR = -4095;
-
-    double vL_cmd = ( (double)pwmL / 4095.0 ) * v_final;
-    double vR_cmd = ( (double)pwmR / 4095.0 ) * v_final;
-    double alpha = 1.0 - exp(-dt_s / tau);
-
-    vL += (vL_cmd - vL) * alpha;
-    vR += (vR_cmd - vR) * alpha;
-
-    double v = 0.5 * (vL + vR);
-    double w = (vR - vL) / trackW;
-
-    double h_rad = heading_deg * (M_PI / 180.0);
-    h_rad += w * dt_s;
-
-    double x2 = x + v * dt_s * cos(h_rad);
-    double y2 = y + v * dt_s * sin(h_rad);
-    double h_deg2 = h_rad * (180.0 / M_PI);
-
-    if (out_x) *out_x = x2;
-    if (out_y) *out_y = y2;
-    if (out_heading_deg) *out_heading_deg = h_deg2;
-    if (out_vL) *out_vL = vL;
-    if (out_vR) *out_vR = vR;
-    if (out_v) *out_v = v;
-    if (out_w) *out_w = w;
-}
-
 LINESIM_API int envelope_contacts_raster_C(
     double cx, double cy, double heading_rad,
     double env_w, double env_h,
@@ -255,4 +213,188 @@ LINESIM_API int envelope_contacts_raster_C(
         }
     }
     return 0;
+}
+
+static inline double clamp(double v, double a, double b){ return v < a ? a : (v > b ? b : v); }
+static inline double sgn(double v){ return (v>0) - (v<0); }
+
+static inline double pwm_to_duty(int pwm, double pmin, double pmax, double pcenter, double deadband)
+{
+    double p = (double)pwm;
+    if (p < pmin) p = pmin; else if (p > pmax) p = pmax;
+    double span_pos = (pmax - pcenter);
+    double span_neg = (pcenter - pmin);
+    double duty;
+    if (p >= pcenter) duty = (span_pos>1e-12) ? ((p - pcenter)/span_pos) : 0.0;
+    else              duty = (span_neg>1e-12) ? ((p - pcenter)/span_neg) : 0.0;
+    if (fabs(duty) < deadband) return 0.0;
+    if (duty > 0.0) duty = (duty - deadband)/fmax(1e-12, 1.0 - deadband);
+    else            duty = (duty + deadband)/fmax(1e-12, 1.0 - deadband);
+    return clamp(duty, -1.0, 1.0);
+}
+
+typedef struct {
+    double dx, dy, dh, dv, dw, dIL, dIR;
+} Deriv;
+
+static Deriv deriv_dc(
+    double x, double y, double h, double v, double w, double IL, double IR,
+    int pwmL, int pwmR,
+    double pmin, double pmax, double pcenter, double deadband,
+    double Vb, double Rb, double Rw, double Vdrop,
+    double Rm, double Lm, double Kt, double Ke, double b, double tau_c,
+    double gear, double eta, double mass, double track, double r, double Jz,
+    double Crr, double rho, double CdA,
+    double mu_s, double mu_k)
+{
+
+    double track_m = track;
+    double r_m = r;
+    if (track_m > 2.0) track_m *= 0.001;
+    if (r_m > 1.0)     r_m     *= 0.001;
+    if (mass < 1e-6)   mass = 1e-6;
+    if (Jz   < 1e-9)   Jz   = 1e-9;
+
+    double vL = v - 0.5*w*track_m;
+    double vR = v + 0.5*w*track_m;
+    double omg_wL = vL / fmax(1e-12, r_m);
+    double omg_wR = vR / fmax(1e-12, r_m);
+    double omg_mL = gear * omg_wL;
+    double omg_mR = gear * omg_wR;
+
+    double dutyL = pwm_to_duty(pwmL, pmin, pmax, pcenter, deadband);
+    double dutyR = pwm_to_duty(pwmR, pmin, pmax, pcenter, deadband);
+
+    double Ibatt = fabs(IL) + fabs(IR);
+    double Vbus  = fmax(0.0, Vb - Ibatt*(Rb + Rw) - Vdrop);
+    double VapplL = dutyL * Vbus;
+    double VapplR = dutyR * Vbus;
+
+    double dIL = (VapplL - Rm*IL - Ke*omg_mL) / fmax(1e-12, Lm);
+    double dIR = (VapplR - Rm*IR - Ke*omg_mR) / fmax(1e-12, Lm);
+
+    double TmL = Kt*IL - b*omg_mL - (tau_c * ( (omg_mL>0)-(omg_mL<0) ));
+    double TmR = Kt*IR - b*omg_mR - (tau_c * ( (omg_mR>0)-(omg_mR<0) ));
+
+    double TwL = eta * gear * TmL;
+    double TwR = eta * gear * TmR;
+
+    double FwL = TwL / fmax(1e-12, r_m);
+    double FwR = TwR / fmax(1e-12, r_m);
+
+    double sign_v = (fabs(v) < 1e-6) ? 0.0 : sgn(v);
+    double F_roll_each = Crr * mass * 9.81 * 0.5 * sign_v;
+    double F_drag_total = 0.5 * rho * CdA * v * fabs(v);
+    double F_drag_each  = 0.5 * F_drag_total;
+
+    double N_each = 0.5 * mass * 9.81;
+    double Fmax_each = mu_s * N_each;
+    if (fabs(FwL) > Fmax_each) FwL = mu_k * N_each * sgn(FwL);
+    if (fabs(FwR) > Fmax_each) FwR = mu_k * N_each * sgn(FwR);
+
+    double FnetL = FwL - F_roll_each - F_drag_each;
+    double FnetR = FwR - F_roll_each - F_drag_each;
+
+    double a = (FnetL + FnetR) / fmax(1e-12, mass);
+    double alpha = ((FnetR - FnetL) * (0.5*track_m)) / fmax(1e-12, Jz);
+
+    double dx = v * cos(h);
+    double dy = v * sin(h);
+    double dh = w;
+
+    Deriv out = { dx, dy, dh, a, alpha, dIL, dIR };
+    return out;
+}
+
+LINESIM_API void step_motor_drivetrain_C(
+    double x, double y, double h,
+    double v, double w, double IL, double IR,
+    int pwmL, int pwmR,
+    double pmin, double pmax, double pcenter, double deadband,
+    double Vb, double Rb, double Rw, double Vdrop,
+    double Rm, double Lm, double Kt, double Ke,
+    double b, double tau_c,
+    double gear, double eta,
+    double mass, double track, double r, double Jz,
+    double Crr, double rho, double CdA,
+    double mu_s, double mu_k,
+    double Imax,
+    double dt,
+    double* ox, double* oy, double* oh,
+    double* ov, double* ow, double* oIL, double* oIR)
+{
+    if (dt <= 0.0) dt = 1e-3;
+
+    Deriv k1 = deriv_dc(x,y,h,v,w,IL,IR,
+                        pwmL,pwmR,pmin,pmax,pcenter,deadband,
+                        Vb,Rb,Rw,Vdrop,
+                        Rm,Lm,Kt,Ke,b,tau_c,
+                        gear,eta,mass,track,r,Jz,
+                        Crr,rho,CdA,mu_s,mu_k);
+
+    double xp = x + dt*k1.dx;
+    double yp = y + dt*k1.dy;
+    double hp = h + dt*k1.dh;
+    double vp = v + dt*k1.dv;
+    double wp = w + dt*k1.dw;
+    double ILp = IL + dt*k1.dIL;
+    double IRp = IR + dt*k1.dIR;
+    if (Imax > 0.0) {
+        if (ILp > Imax) ILp = Imax; else if (ILp < -Imax) ILp = -Imax;
+        if (IRp > Imax) IRp = Imax; else if (IRp < -Imax) IRp = -Imax;
+    }
+
+    Deriv k2 = deriv_dc(xp,yp,hp,vp,wp,ILp,IRp,
+                        pwmL,pwmR,pmin,pmax,pcenter,deadband,
+                        Vb,Rb,Rw,Vdrop,
+                        Rm,Lm,Kt,Ke,b,tau_c,
+                        gear,eta,mass,track,r,Jz,
+                        Crr,rho,CdA,mu_s,mu_k);
+
+    x  += 0.5*dt*(k1.dx  + k2.dx);
+    y  += 0.5*dt*(k1.dy  + k2.dy);
+    h  += 0.5*dt*(k1.dh  + k2.dh);
+    v  += 0.5*dt*(k1.dv  + k2.dv);
+    w  += 0.5*dt*(k1.dw  + k2.dw);
+    IL += 0.5*dt*(k1.dIL + k2.dIL);
+    IR += 0.5*dt*(k1.dIR + k2.dIR);
+
+{
+    const double tau_e = Lm / fmax(1e-12, Rm);
+    const double v_mid = v;
+    const double w_mid = w;
+    const double vL_mid = v_mid - 0.5*w_mid*track;
+    const double vR_mid = v_mid + 0.5*w_mid*track;
+    const double omg_mL_mid = gear * (vL_mid / fmax(1e-12, r));
+    const double omg_mR_mid = gear * (vR_mid / fmax(1e-12, r));
+
+    const double dutyL = pwm_to_duty(pwmL, pmin, pmax, pcenter, deadband);
+    const double dutyR = pwm_to_duty(pwmR, pmin, pmax, pcenter, deadband);
+
+    const double Ibatt_mid = fabs(IL) + fabs(IR);
+    const double Vbus_mid  = fmax(0.0, Vb - Ibatt_mid*(Rb + Rw) - Vdrop);
+
+    const double VapplL_mid = dutyL * Vbus_mid;
+    const double VapplR_mid = dutyR * Vbus_mid;
+
+    const double i_inf_L = (VapplL_mid - Ke*omg_mL_mid) / fmax(1e-12, Rm);
+    const double i_inf_R = (VapplR_mid - Ke*omg_mR_mid) / fmax(1e-12, Rm);
+
+    const double decay = exp(-dt / fmax(1e-12, tau_e));
+    IL = i_inf_L + (IL - i_inf_L) * decay;
+    IR = i_inf_R + (IR - i_inf_R) * decay;
+}
+
+    if (Imax > 0.0) {
+        if (IL > Imax) IL = Imax; else if (IL < -Imax) IL = -Imax;
+        if (IR > Imax) IR = Imax; else if (IR < -Imax) IR = -Imax;
+    }
+
+    if (ox)  *ox = x;
+    if (oy)  *oy = y;
+    if (oh)  *oh = h;
+    if (ov)  *ov = v;
+    if (ow)  *ow = w;
+    if (oIL) *oIL = IL;
+    if (oIR) *oIR = IR;
 }
