@@ -133,7 +133,7 @@
     ]
   },
   "motor_transmission": {
-    "gear_ratio": 19.92,
+    "gear_ratio": 9.96,
     "eta": 0.9,
     "R_motor_ohm": 4.0,
     "L_motor_H": 0.00015,

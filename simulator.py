@@ -65,17 +65,26 @@ _linesim.crossed_finish_C.argtypes = [
 ]
 _linesim.crossed_finish_C.restype = c_int
 
-_linesim.step_dynamics_C = getattr(_linesim, "step_dynamics_C")
-_linesim.step_dynamics_C.argtypes = [
+_linesim.step_motor_drivetrain_C = getattr(_linesim, "step_motor_drivetrain_C")
+_linesim.step_motor_drivetrain_C.argtypes = [
     c_double, c_double, c_double,
-    c_double, c_double,
+    c_double, c_double, c_double, c_double,
     c_int, c_int,
     c_double, c_double, c_double, c_double,
+    c_double, c_double, c_double, c_double,
+    c_double, c_double, c_double, c_double,
+    c_double, c_double,
+    c_double, c_double,
+    c_double, c_double, c_double, c_double,
+    c_double, c_double, c_double,
+    c_double, c_double,
+    c_double,
+    c_double,
     POINTER(c_double), POINTER(c_double), POINTER(c_double),
-    POINTER(c_double), POINTER(c_double),
-    POINTER(c_double), POINTER(c_double)
+    POINTER(c_double), POINTER(c_double), POINTER(c_double), POINTER(c_double)
 ]
-_linesim.step_dynamics_C.restype = None
+_linesim.step_motor_drivetrain_C.restype = None
+
 
 try:
     _linesim.envelope_contacts_raster_C.argtypes = [
@@ -347,175 +356,6 @@ def start_finish_lines(track: Dict[str, Any], segs: List[object], tapeW: float):
     finish_pose = gate_at(max(0.0, sParam - START_FINISH_GAP_MM))
     return (start_pose, finish_pose) if startIsFwd else (finish_pose, start_pose)
 
-PARAMS_JSON_PATH = os.path.join(_here, "simulation_parameters.json")
-
-DEFAULT_SIM_PARAMS = {
-    "final_linear_speed_mps": 2.0,
-    "motor_time_constant_s": 0.010,
-    "simulation_step_dt_ms": 1.0,
-    "sensor_mode": "analog",
-    "sensor_bits": 8,
-    "value_of_line": 0,
-    "value_of_background": 255,
-    "analog_noise_line": 50,
-    "analog_noise_background": 50
-}
-
-def load_sim_params() -> dict:
-    try:
-        with open(PARAMS_JSON_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        out = DEFAULT_SIM_PARAMS.copy()
-        out.update({k: data.get(k, out[k]) for k in out.keys()})
-        return out
-    except Exception:
-        return DEFAULT_SIM_PARAMS.copy()
-
-def save_sim_params(params: dict) -> None:
-    p = DEFAULT_SIM_PARAMS.copy()
-    p.update(params or {})
-    p["final_linear_speed_mps"] = max(0.1, min(20.0, float(p["final_linear_speed_mps"])))
-    p["motor_time_constant_s"]  = max(0.001, min(0.100, float(p["motor_time_constant_s"])))
-    p["simulation_step_dt_ms"] = max(0.5,  min(100.0, float(p["simulation_step_dt_ms"])))
-    p["sensor_mode"]            = "digital" if str(p.get("sensor_mode","analog")).lower().startswith("d") else "analog"
-    p["sensor_bits"]            = int(max(1, min(16, int(p.get("sensor_bits", 8)))))
-    maxv = (1 << int(p["sensor_bits"])) - 1
-    p["value_of_line"]          = int(max(0, min(maxv, int(p["value_of_line"]))))
-    p["value_of_background"]    = int(max(0, min(maxv, int(p["value_of_background"]))))
-    p["analog_noise_line"]       = int(max(0, min(maxv, int(p.get("analog_noise_line", 0)))))
-    p["analog_noise_background"]      = int(max(0, min(maxv, int(p.get("analog_noise_background", 0)))))
-    with open(PARAMS_JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump(p, f, indent=2, ensure_ascii=False)
-
-
-class SimulationParamsDialog(QDialog):
-    """Small dialog to view/edit and persist simulation parameters to JSON."""
-    def __init__(self, parent=None):
-        """Set up references, parameters, and optional logger for a simulation run."""
-        def _apply_mode_enabling():
-            is_digital = (self.combo_sensor.currentText().lower().startswith("d"))
-            self.sp_noise_lo.setEnabled(not is_digital)
-            self.sp_noise_hi.setEnabled(not is_digital)
-
-        def _apply_bit_ranges():
-            maxv = (1 << int(self.sp_bits.value())) - 1
-            for w in (self.sp_line, self.sp_bg, self.sp_noise_lo, self.sp_noise_hi):
-                w.setMaximum(maxv)
-
-        super().__init__(parent)
-        self.setWindowTitle("Simulation parameters")
-        self.setModal(True)
-
-        params = load_sim_params()
-
-        root = QVBoxLayout(self)
-
-        root.addWidget(QLabel("<b>Simulation</b>"))
-
-        row3 = QHBoxLayout()
-        lbl3 = QLabel("Step dt (ms)")
-        lbl3.setToolTip("Physics integration step in milliseconds. Smaller values increase accuracy at the cost of speed.")
-        self.ed_dt = QDoubleSpinBox(); self.ed_dt.setRange(0.5, 100.0); self.ed_dt.setDecimals(1); self.ed_dt.setSingleStep(0.5)
-        self.ed_dt.setValue(float(params["simulation_step_dt_ms"]))
-        self.ed_dt.setToolTip("Time step used by the simulator loop.")
-        row3.addWidget(lbl3); row3.addWidget(self.ed_dt)
-        root.addLayout(row3)
-
-        root.addWidget(QLabel("<b>Motor</b>"))
-        row2 = QHBoxLayout()
-        lbl2 = QLabel("Time constant τ (s)")
-        lbl2.setToolTip("First-order time constant for wheel speed response. Lower is more responsive.")
-        self.ed_tau = QDoubleSpinBox(); self.ed_tau.setRange(0.001, 0.100); self.ed_tau.setDecimals(3); self.ed_tau.setSingleStep(0.001)
-        self.ed_tau.setValue(float(params["motor_time_constant_s"]))
-        self.ed_tau.setToolTip("Defines how quickly the motor speeds follow PWM commands.")
-        row2.addWidget(lbl2); row2.addWidget(self.ed_tau)
-        root.addLayout(row2)
-
-        row1 = QHBoxLayout()
-        lbl1 = QLabel("Linear speed (m/s)")
-        lbl1.setToolTip("Target steady-state robot speed in meters per second. Used as v_final for motor dynamics.")
-        self.ed_vf = QDoubleSpinBox(); self.ed_vf.setRange(0.1, 20.0); self.ed_vf.setSingleStep(0.1)
-        self.ed_vf.setValue(float(params["final_linear_speed_mps"]))
-        self.ed_vf.setToolTip("Sets the reference maximum linear speed used by the dynamics model.")
-        row1.addWidget(lbl1); row1.addWidget(self.ed_vf)
-        root.addLayout(row1)
-
-        root.addWidget(QLabel("<b>Sensors</b>"))
-        row4 = QHBoxLayout()
-        lbl4 = QLabel("Type")
-        lbl4.setToolTip("Select whether sensor outputs are analog values or single-level digital values.")
-        self.combo_sensor = QComboBox(); self.combo_sensor.addItems(["analog", "digital"])
-        idx = 1 if str(params["sensor_mode"]).lower().startswith("d") else 0
-        self.combo_sensor.setCurrentIndex(idx)
-        self.combo_sensor.setToolTip("Analog produces integer readings within the configured bit range; digital produces two fixed levels.")
-        row4.addWidget(lbl4); row4.addWidget(self.combo_sensor)
-        root.addLayout(row4)
-
-        row_bits = QHBoxLayout()
-        lbl_bits = QLabel("N Data Bits")
-        lbl_bits.setToolTip("Resolution for sensor readings. Sets the valid range as 0..(2^n - 1).")
-        self.sp_bits = QSpinBox(); self.sp_bits.setRange(1, 16); self.sp_bits.setValue(int(params.get("sensor_bits", 8)))
-        self.sp_bits.setToolTip("Number of bits for sensor values. Changing this updates value limits automatically.")
-        row_bits.addWidget(lbl_bits); row_bits.addWidget(self.sp_bits)
-        root.addLayout(row_bits)
-
-        row5 = QHBoxLayout()
-        lbl5 = QLabel("Value of line")
-        lbl5.setToolTip("Output value when the sensor covers the tape/line (0..max based on bits).")
-        self.sp_line = QSpinBox(); self.sp_line.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_line.setValue(int(params["value_of_line"]))
-        self.sp_line.setToolTip("Line intensity level used to synthesize sensor readings.")
-        row5.addWidget(lbl5); row5.addWidget(self.sp_line)
-        root.addLayout(row5)
-
-        row6 = QHBoxLayout()
-        lbl6 = QLabel("Value of background")
-        lbl6.setToolTip("Output value when the sensor sees the board/background (0..max based on bits).")
-        self.sp_bg = QSpinBox(); self.sp_bg.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_bg.setValue(int(params["value_of_background"]))
-        self.sp_bg.setToolTip("Background intensity level used to synthesize sensor readings.")
-        row6.addWidget(lbl6); row6.addWidget(self.sp_bg)
-        root.addLayout(row6)
-
-        row7 = QHBoxLayout()
-        lbl7 = QLabel("Analog noise line")
-        lbl7.setToolTip("Defines the random variation applied to the sensor readings when detecting the line. Used only in analog mode.")
-        self.sp_noise_lo = QSpinBox(); self.sp_noise_lo.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_noise_lo.setValue(int(params.get("analog_noise_line", 0)))
-        self.sp_noise_lo.setToolTip("Maximum amplitude of noise affecting line readings (0 means no noise).")
-        row7.addWidget(lbl7); row7.addWidget(self.sp_noise_lo)
-        root.addLayout(row7)
-
-        row8 = QHBoxLayout()
-        lbl8 = QLabel("Analog noise background")
-        lbl8.setToolTip("Defines the random variation applied to the sensor readings when detecting the background area. Used only in analog mode.")
-        self.sp_noise_hi = QSpinBox(); self.sp_noise_hi.setRange(0, (1<<int(params.get("sensor_bits", 8)))-1); self.sp_noise_hi.setValue(int(params.get("analog_noise_background", 0)))
-        self.sp_noise_hi.setToolTip("Maximum amplitude of noise affecting background readings (0 means no noise).")
-        row8.addWidget(lbl8); row8.addWidget(self.sp_noise_hi)
-        root.addLayout(row8)
-
-        self.sp_bits.valueChanged.connect(_apply_bit_ranges)
-        _apply_bit_ranges()
-        self.combo_sensor.currentIndexChanged.connect(lambda _: _apply_mode_enabling())
-        _apply_mode_enabling()
-
-        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel, parent=self)
-        btns.accepted.connect(self._on_save)
-        btns.rejected.connect(self.reject)
-        root.addWidget(btns)
-
-    def _on_save(self):
-        data = {
-            "final_linear_speed_mps": float(self.ed_vf.value()),
-            "motor_time_constant_s":  float(self.ed_tau.value()),
-            "simulation_step_dt_ms": float(self.ed_dt.value()),
-            "sensor_mode":            str(self.combo_sensor.currentText()).lower(),
-            "sensor_bits":            int(self.sp_bits.value()),
-            "value_of_line":          int(self.sp_line.value()),
-            "value_of_background":    int(self.sp_bg.value()),
-            "analog_noise_line":       int(self.sp_noise_lo.value()),
-            "analog_noise_background":      int(self.sp_noise_hi.value())
-        }
-        save_sim_params(data)
-        self.accept()
-
 @dataclass(slots=True)
 class Envelope:
     """Robot outer rectangle (width × height) used for collisions and drawing."""
@@ -528,6 +368,8 @@ class Wheel:
     id: str
     xMM: float
     yMM: float
+    widthMM: float = 22.0
+    heightMM: float = 15.0
 
 @dataclass(slots=True)
 class Sensor:
@@ -546,6 +388,15 @@ class Robot:
     gridStepMM: float = 5.0
     originXMM: float = 0.0
     originYMM: float = 0.0
+    wheelRadiusMM: float = 11.0
+    trackMM: float = 0.0
+    wheelbaseMM: float = 0.0
+    wheelbaseOffsetMM: float = 0.0
+    massKG: float = 0.2
+    J_body_kgm2: float = 0.0
+    mu_static: float = 1.0
+    mu_kinetic: float = 0.8
+    Crr: float = 0.005
 
 def robot_from_json(obj: Dict[str, Any]) -> Robot:
     env = obj.get("envelope")
@@ -555,20 +406,38 @@ def robot_from_json(obj: Dict[str, Any]) -> Robot:
         if width is None or height is None:
             width, height = 160.0, 140.0
         env = {"widthMM": float(width), "heightMM": float(height)}
-    ox = float(obj.get("originXMM", (obj.get("origin") or {}).get("xMM", 0.0)))
-    oy = float(obj.get("originYMM", (obj.get("origin") or {}).get("yMM", 0.0)))
+    gm = obj.get("geometric_mechanical", {}) or {}
+    rot_xy = gm.get("rot_origin_xy_mm") or None
+    if isinstance(rot_xy, list) and len(rot_xy) == 2:
+        ox = float(rot_xy[0]); oy = float(rot_xy[1])
+    else:
+        ox = float(obj.get("originXMM", (obj.get("origin") or {}).get("xMM", 0.0)))
+        oy = float(obj.get("originYMM", (obj.get("origin") or {}).get("yMM", 0.0)))
     if not obj.get("wheels"):  raise ValueError("Invalid robot file: missing 'wheels'.")
     if not obj.get("sensors"): raise ValueError("Invalid robot file: missing 'sensors'.")
-    wheels = [Wheel(w["id"], float(w["xMM"]), float(w["yMM"])) for w in obj["wheels"]]
+    wheels = [
+        Wheel(w.get("id"), float(w.get("xMM")), float(w.get("yMM")), float(w.get("widthMM", 22.0)), float(w.get("heightMM", 15.0)))
+        for w in obj["wheels"]
+    ]
     sensors = [Sensor(s["id"], float(s["xMM"]), float(s["yMM"]), float(s.get("sizeMM", 5.0)))
                for s in obj["sensors"]]
-    return Robot(
+    robot = Robot(
         Envelope(float(env["widthMM"]), float(env["heightMM"])),
         wheels,
         sensors,
         float(obj.get("gridStepMM", 5.0)),
         ox, oy
     )
+    robot.wheelRadiusMM      = float(gm.get("wheel_radius_mm", robot.wheelRadiusMM))
+    robot.trackMM            = float(gm.get("track_mm", robot.trackMM))
+    robot.wheelbaseMM        = float(gm.get("wheelbase_mm", robot.wheelbaseMM))
+    robot.wheelbaseOffsetMM  = float(gm.get("wheelbase_offset_mm", robot.wheelbaseOffsetMM))
+    robot.massKG             = float(gm.get("mass_kg", robot.massKG))
+    robot.J_body_kgm2        = float(gm.get("J_body_kgm2", robot.J_body_kgm2))
+    robot.mu_static          = float(gm.get("mu_static", robot.mu_static))
+    robot.mu_kinetic         = float(gm.get("mu_kinetic", robot.mu_kinetic))
+    robot.Crr                = float(gm.get("Crr", robot.Crr))
+    return robot
 
 def sensor_value_from_coverage(cov: float,
                                sensor_mode: str,
@@ -838,6 +707,133 @@ def rect_rect_overlap_area(R1, R2):
     poly = suth_hodg_clip(R1, R2)
     return poly_area(poly)
 
+def derive_params_from_robot(robot_spec: dict) -> dict:
+    """Derive simulator parameters and physical constants from the robot-spec JSON.
+
+    Adds a compact set of scalar parameters so the simulation thread does not need to
+    poke the JSON repeatedly. This function keeps safe defaults if fields are missing.
+
+    Returned keys (new ones for motor DC + transmission model are documented):
+      - final_linear_speed_mps / motor_time_constant_s (legacy fallback for C model)
+      - simulation_step_dt_ms
+      - sensor_* settings
+      - use_motor_dc_model: bool
+      - Electrical:
+          V_batt_nom_V, R_batt_ohm, R_wiring_ohm, driver_drop_V
+      - Motor/Transmission (per side, assumed identical L and R):
+          Rm_ohm, Lm_H, Kt_Nm_per_A, Ke_V_per_rad, gear_ratio, eta_drive
+          Jm_kgm2, Jload_kgm2, b_visc_Nm_per_radps, tau_coulomb_Nm
+          I_max_A (driver/battery limited), I0_noLoad_A (for reference)
+      - Chassis:
+          mass_kg, track_m, wheel_r_m, Jz_kgm2 (fallback if 0), Crr, rho_air, CdA
+    """
+    try:
+        motor = robot_spec.get("motor_transmission", {}) or {}
+        geom  = robot_spec.get("geometric_mechanical", {}) or {}
+        ctrl  = robot_spec.get("controller", {}) or {}
+        sens  = robot_spec.get("sensorsConfig", {}) or {}
+        elec  = robot_spec.get("electrical", {}) or {}
+
+        wheel_r_mm = float(geom.get("wheel_radius_mm", 11.0))
+        wheel_r_m  = wheel_r_mm / 1000.0
+        track_mm   = float(geom.get("track_mm", 0.0))
+        track_m    = track_mm / 1000.0 if track_mm > 0.0 else 0.07
+        mass_kg    = float(geom.get("mass_kg", 0.2))
+        Jz_kgm2    = float(geom.get("J_body_kgm2", 0.0))
+        if Jz_kgm2 <= 0.0:
+            Jz_kgm2 = max(1e-6, mass_kg * (track_m**2) / 12.0)
+        Crr        = float(geom.get("Crr", 0.005))
+
+        V_batt_nom_V  = float(elec.get("batteryVoltageV", 7.4))
+        R_batt_ohm    = float(elec.get("R_batt_ohm", 0.05))
+        R_wiring_ohm  = float(elec.get("wiring_R_ohm", 0.02))
+        driver_drop_V = float(elec.get("driver_drop_V", 0.2))
+
+        gear          = float(motor.get("gear_ratio", 1.0)) or 1.0
+        eta           = float(motor.get("eta", 0.9)) or 0.9
+        Rm            = float(motor.get("R_motor_ohm", 3.0))
+        Lm            = float(motor.get("L_motor_H", 0.0001))
+        Kt            = float(motor.get("Kt_Nm_per_A", 0.0015))
+        Kv_rad_per_V  = float(motor.get("Kv_rad_per_V", 0.0))
+        Kv_rpm_per_V  = float(motor.get("Kv_rpm_per_V", 0.0))
+        if Kv_rad_per_V <= 0.0 and Kv_rpm_per_V > 0.0:
+            Kv_rad_per_V = (Kv_rpm_per_V * 2.0 * math.pi) / 60.0
+        Ke = 1.0 / Kv_rad_per_V if Kv_rad_per_V > 1e-12 else float(motor.get("Ke_V_per_rad", 0.0)) or 1.0/500.0
+        b_visc       = float(motor.get("b_visc_Nm_per_radps", 0.0))
+        tau_coulomb  = float(motor.get("tau_coulomb_Nm", 0.0))
+        Jm           = float(motor.get("J_motor_kgm2", 1e-8))
+        Jload        = float(motor.get("J_load_kgm2", 0.0))
+        I0_noLoad    = float(motor.get("I0_noLoad_A", 0.0))
+        stall_I      = float(motor.get("stallCurrent_A", 0.0))
+        driver_I     = float(motor.get("driver_current_limit_A", 0.0))
+        I_max        = max(0.0, driver_I, stall_I) if max(driver_I, stall_I) > 0.0 else 3.0
+
+        dt_ms    = float(ctrl.get("simulation_step_dt_ms", 1.0))
+        pwm_bits = int(ctrl.get("pwm_resolution_bits", 12))
+        pwm_max  = int(ctrl.get("pwm_max",  (1<<pwm_bits)-1))
+        pwm_min  = int(ctrl.get("pwm_min",  0))
+        pwm_neutral = ctrl.get("pwm_neutral", None)
+        deadband_percent = float(ctrl.get("deadband_percent", 0.0))
+
+        rpm_no_load = float(motor.get("NoLoadRPM", 10000.0))
+        wheel_rps   = (rpm_no_load / max(1.0, gear)) / 60.0
+        v_mps       = wheel_rps * (2.0 * math.pi * wheel_r_m) * max(0.1, min(1.0, eta))
+        v_mps       = max(0.1, min(20.0, float(v_mps)))
+
+        tau_s = 0.010
+        try:
+            J_eq = Jm + (gear**2)*Jload
+            if Rm > 0.0 and Kt > 0.0 and Ke > 0.0 and J_eq > 0.0:
+                tau_s = max(0.002, min(0.100, (J_eq * Rm) / (Kt * Ke)))
+        except Exception:
+            pass
+
+        sensor_mode = str(sens.get("sensor_mode", "analog")).lower()
+        sensor_bits = int(sens.get("sensor_bits", 8))
+        value_of_line = int(sens.get("value_of_line", 0))
+        value_of_background = int(sens.get("value_of_background", 255))
+        analog_noise_line = int(sens.get("analog_noise_line", 0))
+        analog_noise_background = int(sens.get("analog_noise_background", 0))
+
+        rho_air = 1.225
+        CdA     = 0.02
+
+        return {
+            "final_linear_speed_mps": v_mps,
+            "motor_time_constant_s":  tau_s,
+            "simulation_step_dt_ms":  dt_ms,
+            "pwm_max": pwm_max, "pwm_min": pwm_min, "pwm_neutral": pwm_neutral, "deadband_percent": deadband_percent,
+            "sensor_mode":            sensor_mode,
+            "sensor_bits":            sensor_bits,
+            "value_of_line":          value_of_line,
+            "value_of_background":    value_of_background,
+            "analog_noise_line":      analog_noise_line,
+            "analog_noise_background": analog_noise_background,
+            "use_motor_dc_model": True,
+            "V_batt_nom_V": V_batt_nom_V, "R_batt_ohm": R_batt_ohm, "R_wiring_ohm": R_wiring_ohm, "driver_drop_V": driver_drop_V,
+            "Rm_ohm": Rm, "Lm_H": Lm, "Kt_Nm_per_A": Kt, "Ke_V_per_rad": Ke,
+            "gear_ratio": gear, "eta_drive": eta,
+            "Jm_kgm2": Jm, "Jload_kgm2": Jload,
+            "b_visc_Nm_per_radps": b_visc, "tau_coulomb_Nm": tau_coulomb,
+            "I_max_A": I_max, "I0_noLoad_A": I0_noLoad,
+            "mass_kg": mass_kg, "track_m": track_m, "wheel_r_m": wheel_r_m, "Jz_kgm2": Jz_kgm2, "Crr": Crr,
+            "rho_air": rho_air, "CdA": CdA
+        }
+    except Exception:
+        return {
+            "final_linear_speed_mps": 2.0,
+            "motor_time_constant_s":  0.010,
+            "simulation_step_dt_ms":  1.0,
+            "sensor_mode":            "analog",
+            "sensor_bits":            8,
+            "value_of_line":          0,
+            "value_of_background":    255,
+            "analog_noise_line":      50,
+            "analog_noise_background": 50,
+            "use_motor_dc_model": False
+        }
+
+
 class SimWorker(QThread):
     """Background thread that runs the physics loop and streams steps to the UI."""
     sig_chunk = Signal(list)
@@ -850,6 +846,7 @@ class SimWorker(QThread):
         self.track = track
         self.robot = robot
         self.controller_fn = controller_fn
+        self.params = params
         self.cancelled = False
 
         self.v_final = float(params.get("final_linear_speed_mps", 2.0)) * 1000.0
@@ -866,6 +863,145 @@ class SimWorker(QThread):
         self.logger = SimLogger(base_dir=_here) if save_logs else NoopLogger()
         self._marker_logged = False
         self.track_path = track_path
+
+        self._phys = {
+            "use": bool(params.get("use_motor_dc_model", False)),
+            "Vb": float(params.get("V_batt_nom_V", 7.4)),
+            "Rb": float(params.get("R_batt_ohm", 0.05)),
+            "Rw": float(params.get("R_wiring_ohm", 0.02)),
+            "Vdrop": float(params.get("driver_drop_V", 0.2)),
+            "Rm": float(params.get("Rm_ohm", 3.0)),
+            "Lm": float(params.get("Lm_H", 0.0001)),
+            "Kt": float(params.get("Kt_Nm_per_A", 0.0015)),
+            "Ke": float(params.get("Ke_V_per_rad", 1.0/500.0)),
+            "gear": float(params.get("gear_ratio", 1.0)),
+            "eta": float(params.get("eta_drive", 0.9)),
+            "Jm": float(params.get("Jm_kgm2", 1e-8)),
+            "Jload": float(params.get("Jload_kgm2", 0.0)),
+            "b": float(params.get("b_visc_Nm_per_radps", 0.0)),
+            "tau_c": float(params.get("tau_coulomb_Nm", 0.0)),
+            "Imax": float(params.get("I_max_A", 3.0)),
+            "mass": float(params.get("mass_kg", 0.2)),
+            "track": float(params.get("track_m", 0.07)),
+            "r": float(params.get("wheel_r_m", 0.011)),
+            "Jz": float(params.get("Jz_kgm2", 1e-4)),
+            "Crr": float(params.get("Crr", 0.005)),
+            "rho": float(params.get("rho_air", 1.225)),
+            "CdA": float(params.get("CdA", 0.02)),
+            "mu_static": float(getattr(self.robot, 'mu_static', 1.0)),
+            "mu_kinetic": float(getattr(self.robot, 'mu_kinetic', 0.8)),
+            "pwm_max": float(params.get("pwm_max", 4095)),
+            "pwm_min": float(params.get("pwm_min", -4095)),
+            "deadband_percent": float(params.get("deadband_percent", 0.0))
+        }
+
+    def _pwm_to_duty(self, pwm: int) -> float:
+        """Map controller PWM to duty [-1,1] honoring deadband percentage."""
+        pmax = self._phys["pwm_max"]; pmin = self._phys["pwm_min"]
+        dead = self._phys["deadband_percent"] * 0.01
+        p = max(pmin, min(pmax, float(pwm)))
+        neutral = self.params.get("pwm_neutral", None)
+        if neutral is None:
+            center = 0.5*(pmax + pmin)
+        else:
+            center = float(neutral)
+        span = max(1e-9, max(pmax-center, center-pmin))
+        duty = (p - center) / span
+        if abs(duty) < dead:
+            return 0.0
+        if duty > 0.0:
+            return (duty - dead) / max(1e-9, (1.0 - dead))
+        else:
+            return (duty + dead) / max(1e-9, (1.0 - dead))
+
+    def _rk2_motor_vehicle(self, state, inputs, dt):
+        """Heun / RK2 integrator for [x,y,h, v, w, IL, IR] given PWM inputs.
+
+        state  = (x_m, y_m, h_rad, v_mps, w_radps, IL_A, IR_A)
+        inputs = (pwmL, pwmR)
+        """
+        Vb, Rb, Rw, Vdrop = self._phys["Vb"], self._phys["Rb"], self._phys["Rw"], self._phys["Vdrop"]
+        Rm, Lm, Kt, Ke = self._phys["Rm"], self._phys["Lm"], self._phys["Kt"], self._phys["Ke"]
+        gear, eta = self._phys["gear"], self._phys["eta"]
+        Jm, Jload, b, tau_c = self._phys["Jm"], self._phys["Jload"], self._phys["b"], self._phys["tau_c"]
+        mass, track, r, Jz = self._phys["mass"], self._phys["track"], self._phys["r"], self._phys["Jz"]
+        Crr, rho, CdA, Imax = self._phys["Crr"], self._phys["rho"], self._phys["CdA"], self._phys["Imax"]
+
+        def deriv(s, uL, uR):
+            x, y, h, v, w, IL, IR = s
+            vL = v - 0.5*w*track
+            vR = v + 0.5*w*track
+            omega_wL = vL / max(1e-9, r)
+            omega_wR = vR / max(1e-9, r)
+            omega_mL = gear * omega_wL
+            omega_mR = gear * omega_wR
+
+            dutyL = self._pwm_to_duty(uL)
+            dutyR = self._pwm_to_duty(uR)
+
+            Ibatt = abs(IL) + abs(IR)
+            Vbus = max(0.0, Vb - Ibatt*(Rb + Rw) - Vdrop)
+            VbusL = Vbus
+            VbusR = Vbus
+            VapplL = dutyL * VbusL
+            VapplR = dutyR * VbusR
+
+            dIL = (VapplL - Rm*IL - Ke*omega_mL) / max(1e-9, Lm)
+            dIR = (VapplR - Rm*IR - Ke*omega_mR) / max(1e-9, Lm)
+
+            TmL = Kt*IL - b*omega_mL - (tau_c * (1.0 if omega_mL>0 else (-1.0 if omega_mL<0 else 0.0)))
+            TmR = Kt*IR - b*omega_mR - (tau_c * (1.0 if omega_mR>0 else (-1.0 if omega_mR<0 else 0.0)))
+
+            TwL = eta * gear * TmL
+            TwR = eta * gear * TmR
+            FwL = TwL / max(1e-9, r)
+            FwR = TwR / max(1e-9, r)
+
+            sign_v = 0.0 if abs(v)<1e-6 else (1.0 if v>0 else -1.0)
+            F_roll_each = Crr * mass * 9.81 * 0.5 * sign_v
+            F_drag_total = 0.5 * rho * CdA * v * abs(v)
+            F_drag_each  = 0.5 * F_drag_total
+
+            mu_s = self._phys.get("mu_static", 1.0)
+            mu_k = self._phys.get("mu_kinetic", 0.8)
+            N_each = 0.5 * mass * 9.81
+            Fmax_each = mu_s * N_each
+            def clamp_traction(Fw):
+                if abs(Fw) <= Fmax_each:
+                    return Fw
+                return math.copysign(mu_k * N_each, Fw)
+            FwL = clamp_traction(FwL)
+            FwR = clamp_traction(FwR)
+
+            FnetL = FwL - F_roll_each - F_drag_each
+            FnetR = FwR - F_roll_each - F_drag_each
+
+            a = (FnetL + FnetR) / max(1e-9, mass)
+            alpha = ((FnetR - FnetL) * (0.5*track)) / max(1e-9, Jz)
+
+            dx = v * math.cos(h)
+            dy = v * math.sin(h)
+            dh = w
+
+            return (dx, dy, dh, a, alpha, dIL, dIR)
+
+        pwmL, pwmR = inputs
+        k1 = deriv(state, pwmL, pwmR)
+        s_pred = tuple(state[i] + dt*k1[i] for i in range(len(state)))
+        if len(s_pred) >= 7:
+            _x,_y,_h,_v,_w,_ILp,_IRp = s_pred
+            _ILp = max(-Imax, min(Imax, _ILp))
+            _IRp = max(-Imax, min(Imax, _IRp))
+            s_pred = (_x,_y,_h,_v,_w,_ILp,_IRp)
+        k2 = deriv(s_pred, pwmL, pwmR)
+
+        s_next = tuple(state[i] + 0.5*dt*(k1[i]+k2[i]) for i in range(len(state)))
+
+        x, y, h, v, w, IL, IR = s_next
+        IL = max(-Imax, min(Imax, IL))
+        IR = max(-Imax, min(Imax, IR))
+
+        return (x, y, h, v, w, IL, IR)
 
     def _initial_pose(self):
         """Choose the starting pose: behind the Start gate if available, otherwise the track origin."""
@@ -1032,17 +1168,18 @@ class SimWorker(QThread):
         return segs, origin, tapeW
 
     def run(self):
-        """Main simulation loop: query controller, integrate dynamics via C API, stream steps, and stop on finish/collision."""
+        """Main simulation loop.
+        If use_motor_dc_model=True, uses a Python RK2 DC-motor + drivetrain model.
+        Otherwise, falls back to the C dynamics (legacy first-order).
+        """
         try:
             segs, origin, tapeW = self._prepare_track_geometry()
             tape_half = float(tapeW) * 0.5
 
             start_pose = self._initial_pose()
-            x, y, h = start_pose.p.x, start_pose.p.y, float(start_pose.headingDeg)
+            x_mm, y_mm, h_deg = start_pose.p.x, start_pose.p.y, float(start_pose.headingDeg)
 
-            vL = 0.0; vR = 0.0; v = 0.0; w = 0.0
-            prev_v = 0.0; prev_w = 0.0
-            trackW = abs(self.robot.wheels[-1].yMM - self.robot.wheels[0].yMM) if len(self.robot.wheels) >= 2 else 120.0  # use lateral (Y) distance between wheels
+            trackW_mm = float(self.robot.trackMM) if float(getattr(self.robot, 'trackMM', 0.0)) > 0.0 else (abs(self.robot.wheels[-1].yMM - self.robot.wheels[0].yMM) if len(self.robot.wheels) >= 2 else 120.0)
             dt = float(self.dt_s)
             t_ms = 0
 
@@ -1050,19 +1187,27 @@ class SimWorker(QThread):
             if self._gates:
                 (sa, sb, shdg_run, shdg_base), (fa, fb, *_rest) = self._gates
                 zone = FinishZoneChecker(sa, sb, fa, fb)
-                zone.prime(x, y)
+                zone.prime(x_mm, y_mm)
 
             CHUNK = 200
             chunk_buf = []
 
             env_w = float(self.robot.envelope.widthMM)
             env_h = float(self.robot.envelope.heightMM)
-            tape_half_with_margin = tape_half
-
             sensor_half = float(self.robot.sensors[0].sizeMM) * 0.5 if self.robot.sensors else 2.5
 
+            v_mm_s = 0.0; w_rad_s = 0.0
+            prev_v_mm_s = 0.0; prev_w_rad_s = 0.0
+            vL_mm_s = 0.0; vR_mm_s = 0.0
+
+            use_dc = bool(self._phys.get("use", False))
+
+            x_m, y_m = x_mm/1000.0, y_mm/1000.0
+            h_rad = math.radians(h_deg)
+            v_mps = 0.0; w_radps = 0.0; IL = 0.0; IR = 0.0
+
             while not self.cancelled:
-                sx, sy = self._sensors_world_xy(x, y, h)
+                sx, sy = self._sensors_world_xy(x_mm, y_mm, h_deg)
                 cov = self._coverage_from_raster_batch(sx, sy, sensor_half*2.0, grid_n=3)
                 sn_vals = [sensor_value_from_coverage(
                     cov[i], self.sensor_mode, self.sensor_bits,
@@ -1070,49 +1215,80 @@ class SimWorker(QThread):
                     self.analog_noise_line, self.analog_noise_background
                 ) for i in range(len(cov))]
 
-                a_lin = (v - prev_v) / max(1e-9, dt)
-                a_ang = (w - prev_w) / max(1e-9, dt)
+                a_lin = (v_mm_s - prev_v_mm_s) / max(1e-9, dt)
+                a_ang = (w_rad_s - prev_w_rad_s) / max(1e-9, dt)
 
-                state = {
+                state_for_ctrl = {
                     "t_ms": t_ms,
-                    "x_mm": x, "y_mm": y, "heading_deg": h,
-                    "v_mm_s": v, "omega_rad_s": w,
+                    "x_mm": x_mm, "y_mm": y_mm, "heading_deg": h_deg,
+                    "v_mm_s": v_mm_s, "omega_rad_s": w_rad_s,
                     "a_lin_mm_s2": a_lin, "alpha_rad_s2": a_ang,
                     "sensors": sn_vals,
-                    "v_left_mm_s": vL, "v_right_mm_s": vR,
+                    "v_left_mm_s": vL_mm_s, "v_right_mm_s": vR_mm_s,
                 }
 
                 try:
-                    out = self.controller_fn(state)
+                    out = self.controller_fn(state_for_ctrl)
                     pwmL = int(out.get("pwm_left", 1500)) if isinstance(out, dict) else 1500
                     pwmR = int(out.get("pwm_right", 1500)) if isinstance(out, dict) else 1500
                 except Exception as e:
                     print(f"[Controller Error] {e}")
                     pwmL, pwmR = 1500, 1500
 
-                ox = c_double(); oy = c_double(); oh = c_double()
-                o_vL = c_double(); o_vR = c_double(); o_v = c_double(); o_w = c_double()
-                prev_v, prev_w = v, w
-                _linesim.step_dynamics_C(
-                    c_double(x), c_double(y), c_double(h),
-                    c_double(vL), c_double(vR),
-                    c_int(pwmL), c_int(pwmR),
-                    c_double(self.v_final), c_double(self.tau), c_double(trackW), c_double(dt),
-                    ctypes.byref(ox), ctypes.byref(oy), ctypes.byref(oh),
-                    ctypes.byref(o_vL), ctypes.byref(o_vR),
-                    ctypes.byref(o_v), ctypes.byref(o_w)
-                )
-                prev_pose = (x, y, h)
-                x, y, h = ox.value, oy.value, oh.value
-                vL, vR, v, w = o_vL.value, o_vR.value, o_v.value, o_w.value
+                prev_v_mm_s, prev_w_rad_s = v_mm_s, w_rad_s
+                px_prev, py_prev, h_prev = x_mm, y_mm, h_deg
 
+                ox = c_double(); oy = c_double(); oh = c_double()
+                ov = c_double(); ow = c_double(); oIL = c_double(); oIR = c_double()
+
+                self._phys["pwm_min"] = float(self._phys.get("pwm_min", -4095.0))
+                self._phys["pwm_max"] = float(self._phys.get("pwm_max",  4095.0))
+                neutral_raw = self.params.get("pwm_neutral", None)
+                if neutral_raw is None:
+                    pcenter = 0.5*(self._phys["pwm_min"]+self._phys["pwm_max"])
+                else:
+                    pcenter = float(neutral_raw)
+                deadband = float(self._phys.get("deadband_percent", 0.0)) * 0.01
+
+                _linesim.step_motor_drivetrain_C(
+                    c_double(x_mm/1000.0), c_double(y_mm/1000.0), c_double(h_rad),
+                    c_double(v_mps), c_double(w_radps), c_double(IL), c_double(IR),
+                    c_int(pwmL), c_int(pwmR),
+                    c_double(self._phys["pwm_min"]), c_double(self._phys["pwm_max"]), c_double(pcenter), c_double(deadband),
+                    c_double(self._phys["Vb"]), c_double(self._phys["Rb"]), c_double(self._phys["Rw"]), c_double(self._phys["Vdrop"]),
+                    c_double(self._phys["Rm"]), c_double(self._phys["Lm"]), c_double(self._phys["Kt"]), c_double(self._phys["Ke"]),
+                    c_double(self._phys.get("b", 0.0)), c_double(self._phys.get("tau_c", 0.0)),
+                    c_double(self._phys["gear"]), c_double(self._phys["eta"]),
+                    c_double(self._phys["mass"]), c_double(self._phys["track"]), c_double(self._phys["r"]), c_double(self._phys["Jz"]),
+                    c_double(self._phys["Crr"]), c_double(self._phys["rho"]), c_double(self._phys["CdA"]),
+                    c_double(self._phys.get("mu_static", 1.0)), c_double(self._phys.get("mu_kinetic", 0.8)),
+                    c_double(self._phys["Imax"]),
+                    c_double(dt),
+                    ctypes.byref(ox), ctypes.byref(oy), ctypes.byref(oh), ctypes.byref(ov), ctypes.byref(ow), ctypes.byref(oIL), ctypes.byref(oIR)
+                )
+
+                x_mm  = ox.value*1000.0
+                y_mm  = oy.value*1000.0
+                h_rad = oh.value
+                h_deg = math.degrees(h_rad)
+                v_mps = ov.value
+                w_radps = ow.value
+                IL = oIL.value
+                IR = oIR.value
+
+                vL_mps = v_mps - 0.5*w_radps*self._phys["track"]
+                vR_mps = v_mps + 0.5*w_radps*self._phys["track"]
+                vL_mm_s = vL_mps*1000.0
+                vR_mm_s = vR_mps*1000.0
+                v_mm_s  = v_mps*1000.0
+                w_rad_s = w_radps
 
                 try:
                     if self._rmap_ptr and self._rmap_meta:
-                        cx = x - self.robot.originXMM
-                        cy = y - self.robot.originYMM
+                        cx = x_mm - self.robot.originXMM
+                        cy = y_mm - self.robot.originYMM
                         hit = _linesim.envelope_contacts_raster_C(
-                            c_double(cx), c_double(cy), c_double(math.radians(h)),
+                            c_double(cx), c_double(cy), c_double(math.radians(h_deg)),
                             c_double(env_w), c_double(env_h),
                             self._rmap_ptr, c_int(self._rmap_meta["W"]), c_int(self._rmap_meta["H"]),
                             c_double(self._rmap_meta["origin_x"]), c_double(self._rmap_meta["origin_y"]), c_double(self._rmap_meta["pixel_mm"])
@@ -1124,17 +1300,17 @@ class SimWorker(QThread):
 
                 finished = False
                 if zone is not None:
-                    finished = zone.update(prev_pose, (x, y, h), env_w, env_h, t_ms)
+                    finished = zone.update((px_prev, py_prev, h_prev), (x_mm, y_mm, h_deg), env_w, env_h, t_ms)
 
                 step = {
                     "t_ms": t_ms,
-                    "x_mm": x, "y_mm": y, "heading_deg": h,
-                    "v_mm_s": v, "omega_rad_s": w,
+                    "x_mm": x_mm, "y_mm": y_mm, "heading_deg": h_deg,
+                    "v_mm_s": v_mm_s, "omega_rad_s": w_rad_s,
                     "a_lin_mm_s2": a_lin, "alpha_rad_s2": a_ang,
                     "sensors": sn_vals,
-                    "v_left_mm_s": vL, "v_right_mm_s": vR,
+                    "v_left_mm_s": vL_mm_s, "v_right_mm_s": vR_mm_s,
                 }
-                self.logger.log_step(t_ms, x, y, h, v, w, pwmL, pwmR, sensors=sn_vals)
+                self.logger.log_step(t_ms, x_mm, y_mm, h_deg, v_mm_s, w_rad_s, pwmL, pwmR, sensors=sn_vals)
                 chunk_buf.append(step)
                 if len(chunk_buf) >= CHUNK:
                     self.sig_chunk.emit(chunk_buf)
@@ -1206,6 +1382,7 @@ class MainWindow(QMainWindow):
         controls = QWidget(); form = QFormLayout(controls)
 
         self.anim_interval_ms = 42
+        self.sim_dt_s = 0.001
         self.stream_draw_interval_ms = 200
         self._last_stream_draw_ns = 0
         self.streaming = False
@@ -1221,6 +1398,7 @@ class MainWindow(QMainWindow):
 
         self.controller_path = None
         self.robot_path = None
+        self.robot_data_raw = {}
         self.track_path = None
         self.lbl_ctrl_status = QLabel("—")
         self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
@@ -1231,17 +1409,6 @@ class MainWindow(QMainWindow):
         self.btn_robot.setToolTip("Select a robot description (.json).")
         self.btn_ctrl  = QPushButton("Load controller (.py)")
         self.btn_ctrl.setToolTip("Select a Python file implementing control_step(state).")
-        self.btn_params = QPushButton("Simulation parameters")
-        self.btn_params.setToolTip("Open a dialog to edit and persist simulation parameters to simulation_parameters.json.")
-        self.spin_vf   = QDoubleSpinBox(); self.spin_vf.setRange(0.1, 20.0); self.spin_vf.setValue(2.0); self.spin_vf.setSingleStep(0.1)
-        self.spin_tau  = QDoubleSpinBox(); self.spin_tau.setRange(0.001, 0.100); self.spin_tau.setDecimals(3); self.spin_tau.setSingleStep(0.001); self.spin_tau.setValue(0.010)
-
-        self.spin_dt  = QDoubleSpinBox()
-        self.spin_dt.setRange(0.5, 100.0)
-        self.spin_dt.setDecimals(1)
-        self.spin_dt.setSingleStep(0.5)
-        self.spin_dt.setValue(1.0)
-        self.sim_dt_s = float(self.spin_dt.value()) / 1000.0
 
         self.btn_sim   = QPushButton("Start")
         self.btn_sim.setToolTip("Start a new simulation with the currently loaded track, robot and controller.")
@@ -1265,9 +1432,6 @@ class MainWindow(QMainWindow):
 
         form.addRow(QLabel("<b>Simulation Files</b>"))
 
-        form.addRow(self.btn_params)
-
-        # Controller row: button + status
         self.lbl_ctrl_status = QLabel("—")
         self.lbl_ctrl_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
         self.lbl_ctrl_status.setToolTip("Loaded controller file.")
@@ -1277,7 +1441,6 @@ class MainWindow(QMainWindow):
         row_ctrl_layout.addWidget(self.lbl_ctrl_status)
         form.addRow(row_ctrl)
 
-        # Robot row: button + status
         self.lbl_robot_status = QLabel("—")
         self.lbl_robot_status.setStyleSheet("color: #aaaaaa; font-weight: 500;")
         self.lbl_robot_status.setToolTip("Loaded robot file.")
@@ -1336,7 +1499,6 @@ class MainWindow(QMainWindow):
         replay_ctrl_layout.addWidget(self.btn_track_robot)
         form.addRow(replay_ctrl_row)
 
-        self.btn_params.clicked.connect(self.on_open_params)
         self.btn_stop.setEnabled(False)
         self.btn_replay.setEnabled(False)
         self.is_replaying = False
@@ -1375,10 +1537,8 @@ class MainWindow(QMainWindow):
         self.btn_replay_stop.setEnabled(False)
         self.update_replay_buttons()
 
-        self.spin_dt.valueChanged.connect(self._refresh_title)
+        self.setWindowTitle(f"Line-Follower Simulator")
 
-
-        # Replay state flag
         self.is_replaying = False
 
     def update_replay_buttons(self):
@@ -1386,27 +1546,6 @@ class MainWindow(QMainWindow):
         has_steps = bool(self.anim_steps)
         self.btn_replay.setEnabled(has_steps and not self.is_replaying and not self.streaming)
         self.btn_replay_stop.setEnabled(self.is_replaying)
-        self._refresh_title()
-
-    def on_open_params(self):
-        """Open the parameters dialog, then refresh spin boxes and window title."""
-        dlg = SimulationParamsDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            p = load_sim_params()
-            self.spin_vf.setValue(float(p["final_linear_speed_mps"]))
-            self.spin_tau.setValue(float(p["motor_time_constant_s"]))
-            self.spin_dt.setValue(float(p["simulation_step_dt_ms"]))
-            self.sim_dt_s = float(p["simulation_step_dt_ms"]) / 1000.0
-            self._refresh_title()
-            QMessageBox.information(self, "Simulation parameters", "Parameters saved to simulation_parameters.json")
-            try:
-                self.on_speed_change(self.combo_speed.currentIndex())
-            except Exception:
-                pass
-
-    def _refresh_title(self):
-        """Show the current dt (ms) in the window title for quick reference."""
-        self.setWindowTitle(f"Line-Follower Simulator (dt = {self.sim_dt_s*1000.0:.1f} ms)")
 
     def _draw_robot_at_initial_pose(self):
         """Draw the robot body/wheels/sensors at the initial pose onto the scene."""
@@ -1446,9 +1585,10 @@ class MainWindow(QMainWindow):
             if k < len(self.anim_items["sensors"]):
                 self.anim_items["sensors"][k].setPath(sp)
 
-        half_w = WHEEL_W_MM * 0.5
-        half_h = WHEEL_H_MM * 0.5
         for k, wdef in enumerate(self.robot.wheels):
+            half_w = float(getattr(wdef, 'widthMM', WHEEL_W_MM)) * 0.5
+            half_h = float(getattr(wdef, 'heightMM', WHEEL_H_MM)) * 0.5
+
             px, py = wdef.xMM - ox, wdef.yMM - oy
             rx, ry = rot(px, py, ang)
             cx, cy = pos.p.x + rx, pos.p.y + ry
@@ -1494,7 +1634,9 @@ class MainWindow(QMainWindow):
         if not path: return
         try:
             with open(path, "r", encoding="utf-8") as f:
-                self.robot = robot_from_json(json.load(f))
+                _raw = json.load(f)
+                self.robot_data_raw = _raw
+                self.robot = robot_from_json(_raw)
             self.robot_path = path
             base = os.path.basename(path)
             self.statusBar().showMessage(f"Robot: {base}", 5000)
@@ -1582,7 +1724,9 @@ class MainWindow(QMainWindow):
         if getattr(self, "robot_path", None):
             try:
                 with open(self.robot_path, "r", encoding="utf-8") as f:
-                    self.robot = robot_from_json(json.load(f))
+                    _raw = json.load(f)
+                    self.robot_data_raw = _raw
+                    self.robot = robot_from_json(_raw)
                 if self.track:
                     self.draw_robot_outline_preview()
                 base = os.path.basename(self.robot_path)
@@ -1738,8 +1882,8 @@ class MainWindow(QMainWindow):
         for wdef in self.robot.wheels:
             rx, ry = rot(wdef.xMM + self.robot.originXMM, wdef.yMM + self.robot.originYMM, ang)
             px, py = pos.p.x + rx, pos.p.y + ry
-            half_w = WHEEL_W_MM * 0.5
-            half_h = WHEEL_H_MM * 0.5
+            half_w = float(getattr(wdef, 'widthMM', WHEEL_W_MM)) * 0.5
+            half_h = float(getattr(wdef, 'heightMM', WHEEL_H_MM)) * 0.5
             corners = [(-half_w, -half_h), ( half_w, -half_h), ( half_w,  half_h), (-half_w,  half_h)]
             wp = QPainterPath()
             for i, (cx, cy) in enumerate(corners + [corners[0]]):
@@ -1773,7 +1917,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.btn_replay.setEnabled(False)
 
-        p = load_sim_params()
+        p = derive_params_from_robot(getattr(self, 'robot_data_raw', {}) or {})
         self.v_max_mm_s = float(p.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.sim_dt_s = max(0.0005, min(0.1, float(p.get("simulation_step_dt_ms", 1.0)) / 1000.0))
 
@@ -2013,9 +2157,10 @@ class MainWindow(QMainWindow):
                 if k < len(self.anim_items["sensors"]):
                     self.anim_items["sensors"][k].setPath(sp)
 
-            half_w = WHEEL_W_MM * 0.5
-            half_h = WHEEL_H_MM * 0.5
             for k, wdef in enumerate(self.robot.wheels):
+                half_w = float(getattr(wdef, 'widthMM', WHEEL_W_MM)) * 0.5
+                half_h = float(getattr(wdef, 'heightMM', WHEEL_H_MM)) * 0.5
+
                 px, py = wdef.xMM - self.robot.originXMM, wdef.yMM - self.robot.originYMM
                 rx, ry = rot(px, py, ang)
                 cx, cy = x + rx, y + ry

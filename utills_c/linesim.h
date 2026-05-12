@@ -41,15 +41,6 @@ LINESIM_API void estimate_sensors_coverage_batch_C(
     int n_grid,
     double* out_cov);
 
-LINESIM_API void step_dynamics_C(
-    double x, double y, double heading_deg,
-    double vL, double vR,
-    int pwmL, int pwmR,
-    double v_final, double tau, double trackW, double dt_s,
-    double* out_x, double* out_y, double* out_heading_deg,
-    double* out_vL, double* out_vR,
-    double* out_v, double* out_w);
-
 LINESIM_API int segments_intersect_C(
     double ax, double ay, double bx, double by,
     double cx, double cy, double dx, double dy);
@@ -66,6 +57,24 @@ LINESIM_API int envelope_contacts_raster_C(
     double env_w, double env_h,
     const unsigned char* mask, int W, int H,
     double origin_x, double origin_y, double pixel_mm);
+
+LINESIM_API void step_motor_drivetrain_C(
+    double x_m, double y_m, double heading_rad,
+    double v_mps, double w_radps, double I_L_A, double I_R_A,
+    int pwmL, int pwmR,
+    double pwm_min, double pwm_max, double pwm_center, double deadband_01,
+    double V_batt, double R_batt, double R_wiring, double V_driver_drop,
+    double Rm, double Lm, double Kt, double Ke,
+    double b_visc, double tau_coulomb,
+    double gear, double eta_drive,
+    double mass, double track, double wheel_r, double Jz,
+    double Crr, double rho, double CdA,
+    double mu_static, double mu_kinetic,
+    double I_max,
+    double dt_s,
+    double* out_x_m, double* out_y_m, double* out_heading_rad,
+    double* out_v_mps, double* out_w_radps,
+    double* out_I_L_A, double* out_I_R_A);
 
 #ifdef __cplusplus
 }

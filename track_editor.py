@@ -191,13 +191,15 @@ class MainWindow(QMainWindow):
         sf_forward_hint = "If checked, 'Start' is at increasing s; otherwise it is at decreasing s."
         file_hint = "Create, import or export a track file in JSON format."
 
-        area_title = QLabel("<b>Area (mm)</b>")
+        area_title = QLabel("<b>Area</b>")
         area_title.setToolTip(area_hint)
         form.addRow(area_title)
 
-        self.spin_area_w = QDoubleSpinBox(); self.spin_area_w.setRange(100, 100000); self.spin_area_w.setValue(self.model.area_widthMM)
-        self.spin_area_h = QDoubleSpinBox(); self.spin_area_h.setRange(100, 100000); self.spin_area_h.setValue(self.model.area_heightMM)
-        self.spin_grid   = QDoubleSpinBox(); self.spin_grid.setRange(5, 1000); self.spin_grid.setValue(self.model.gridStepMM)
+        self.spin_area_w = QDoubleSpinBox(); self.spin_area_w.setRange(100, 100000); self.spin_area_w.setValue(self.model.area_widthMM); self.spin_area_w.setSuffix(" mm")
+        self.spin_area_h = QDoubleSpinBox(); self.spin_area_h.setRange(100, 100000); self.spin_area_h.setValue(self.model.area_heightMM); self.spin_area_h.setSuffix(" mm")
+        self.spin_grid   = QDoubleSpinBox(); self.spin_grid.setRange(5, 1000); self.spin_grid.setValue(self.model.gridStepMM); self.spin_grid.setSuffix(" mm")
+
+
 
         self.spin_area_w.setToolTip("Canvas width in millimeters.")
         self.spin_area_h.setToolTip("Canvas height in millimeters.")
@@ -211,13 +213,13 @@ class MainWindow(QMainWindow):
         wrap_area = QWidget(); wrap_area.setLayout(row_area)
         form.addRow(wrap_area)
 
-        origin_title = QLabel("<b>Origin (mm)</b>")
+        origin_title = QLabel("<b>Origin</b>")
         origin_title.setToolTip(origin_hint)
         form.addRow(origin_title)
 
-        self.spin_ox = QDoubleSpinBox(); self.spin_ox.setRange(-100000,100000); self.spin_ox.setValue(self.model.origin.p.x)
-        self.spin_oy = QDoubleSpinBox(); self.spin_oy.setRange(-100000,100000); self.spin_oy.setValue(self.model.origin.p.y)
-        self.spin_oh = QDoubleSpinBox(); self.spin_oh.setRange(-360,360); self.spin_oh.setDecimals(1); self.spin_oh.setValue(self.model.origin.headingDeg)
+        self.spin_ox = QDoubleSpinBox(); self.spin_ox.setRange(-100000,100000); self.spin_ox.setValue(self.model.origin.p.x); self.spin_ox.setSuffix(" mm")
+        self.spin_oy = QDoubleSpinBox(); self.spin_oy.setRange(-100000,100000); self.spin_oy.setValue(self.model.origin.p.y); self.spin_oy.setSuffix(" mm")
+        self.spin_oh = QDoubleSpinBox(); self.spin_oh.setRange(-360,360); self.spin_oh.setDecimals(1); self.spin_oh.setValue(self.model.origin.headingDeg); self.spin_oh.setSuffix(" °")
 
         self.spin_ox.setToolTip("Origin X position (mm).")
         self.spin_oy.setToolTip("Origin Y position (mm).")
@@ -226,21 +228,21 @@ class MainWindow(QMainWindow):
         row_origin = QHBoxLayout()
         col_x = QVBoxLayout(); col_x.addWidget(QLabel("X")); col_x.addWidget(self.spin_ox)
         col_y = QVBoxLayout(); col_y.addWidget(QLabel("Y")); col_y.addWidget(self.spin_oy)
-        col_a = QVBoxLayout(); col_a.addWidget(QLabel("Angle (Deg)")); col_a.addWidget(self.spin_oh)
+        col_a = QVBoxLayout(); col_a.addWidget(QLabel("Angle")); col_a.addWidget(self.spin_oh)
         row_origin.addLayout(col_x); row_origin.addLayout(col_y); row_origin.addLayout(col_a)
         wrap_origin = QWidget(); wrap_origin.setLayout(row_origin)
         form.addRow(wrap_origin)
 
-        segments_title = QLabel("<b>Segments (mm, °)</b>")
+        segments_title = QLabel("<b>Segments</b>")
         segments_title.setToolTip(segments_hint)
         form.addRow(segments_title)
 
         self.list_segments = QListWidget(); self.list_segments.setToolTip("List of segments in order. Select to edit.")
         form.addRow(self.list_segments)
 
-        self.spin_length = QDoubleSpinBox(); self.spin_length.setRange(1, 1e6); self.spin_length.setToolTip(length_hint)
-        self.spin_radius = QDoubleSpinBox(); self.spin_radius.setRange(1, 1e6); self.spin_radius.setToolTip(radius_hint)
-        self.spin_sweep  = QDoubleSpinBox(); self.spin_sweep.setRange(-1080,1080); self.spin_sweep.setDecimals(1); self.spin_sweep.setToolTip(angle_hint)
+        self.spin_length = QDoubleSpinBox(); self.spin_length.setRange(1, 1e6); self.spin_length.setToolTip(length_hint); self.spin_length.setSuffix(" mm")
+        self.spin_radius = QDoubleSpinBox(); self.spin_radius.setRange(1, 1e6); self.spin_radius.setToolTip(radius_hint); self.spin_radius.setSuffix(" mm")
+        self.spin_sweep  = QDoubleSpinBox(); self.spin_sweep.setRange(-1080,1080); self.spin_sweep.setDecimals(1); self.spin_sweep.setToolTip(angle_hint); self.spin_sweep.setSuffix(" °")
 
         row_seg_params = QHBoxLayout()
         col_len = QVBoxLayout(); col_len.addWidget(QLabel("Length"));       col_len.addWidget(self.spin_length)
@@ -262,7 +264,7 @@ class MainWindow(QMainWindow):
         row_btns.addWidget(self.btn_add_st); row_btns.addWidget(self.btn_add_ar); row_btns.addWidget(self.btn_del); row_btns.addWidget(self.btn_ren)
         form.addRow(row_btns)
 
-        sf_title = QLabel("<b>Start/Finish (mm)</b>")
+        sf_title = QLabel("<b>Start/Finish</b>")
         sf_title.setToolTip(sf_hint)
         form.addRow(sf_title)
 
