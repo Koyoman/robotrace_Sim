@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -21,6 +22,65 @@ from Utils.track_geometry import (
     rad,
 )
 from Utils.track_spec import TrackSpec
+
+RMAP_FORMAT = "RobotraceSim.rmap"
+RMAP_VERSION = 2
+DEFAULT_RASTER_PARAMS: dict[str, float] = {
+    "polyline_step_mm": 1.0,
+    "margin_mm": 80.0,
+    "pixel_mm": 1.0,
+    "marker_offset_mm": float(MARKER_OFFSET_MM),
+    "marker_length_mm": float(MARKER_LENGTH_MM),
+    "marker_thickness_mm": float(MARKER_THICKNESS_MM),
+    "start_finish_gap_mm": float(START_FINISH_GAP_MM),
+    "straight_near_xing_mm": float(STRAIGHT_NEAR_XING_MM),
+}
+
+
+def _canonical_track_payload(track: TrackSpec) -> dict[str, Any]:
+    """Return only the track content that changes generated raster output."""
+    return track.to_dict()
+
+
+def track_cache_fingerprint(track: TrackSpec, raster_params: dict[str, Any] | None = None) -> str:
+    """Hash relevant track content plus rasterization parameters for .rmap cache validation."""
+    payload = {
+        "track": _canonical_track_payload(track),
+        "raster_params": dict(raster_params or DEFAULT_RASTER_PARAMS),
+        "rmap_format": RMAP_FORMAT,
+        "rmap_version": RMAP_VERSION,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def is_rmap_cache_valid(meta: dict[str, Any], expected_fingerprint: str, expected_data_len: int | None = None) -> bool:
+    """Validate .rmap metadata against the expected fingerprint and basic dimensions."""
+    if not isinstance(meta, dict):
+        return False
+    if meta.get("format") != RMAP_FORMAT:
+        return False
+    try:
+        version = int(meta.get("version", -1))
+    except (TypeError, ValueError):
+        return False
+    if version != RMAP_VERSION:
+        return False
+    if meta.get("fingerprint") != expected_fingerprint:
+        return False
+    try:
+        width = int(meta["W"])
+        height = int(meta["H"])
+        pixel = float(meta["pixel_mm"])
+        float(meta["origin_x"])
+        float(meta["origin_y"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if width <= 0 or height <= 0 or pixel <= 0:
+        return False
+    if expected_data_len is not None and expected_data_len != width * height:
+        return False
+    return True
 
 
 def rot(x: float, y: float, a: float) -> tuple[float, float]:
@@ -188,28 +248,32 @@ def _rmap_load(path: str) -> tuple[dict, bytes] | None:
 
 def ensure_track_raster(track_path: str, track: TrackSpec, segs: list, tape_w: float, gates) -> dict[str, Any]:
     rpath = _raster_paths_for_track(track_path)
+    raster_params = dict(DEFAULT_RASTER_PARAMS)
+    expected_fingerprint = track_cache_fingerprint(track, raster_params)
     cached = _rmap_load(rpath)
     if cached is not None:
         meta, data = cached
-        return {"path": rpath, "meta": meta, "data": data}
+        if is_rmap_cache_valid(meta, expected_fingerprint, expected_data_len=len(data)):
+            return {"path": rpath, "meta": meta, "data": data}
 
-    pts = segments_polyline(segs, step=1.0)
+    pts = segments_polyline(segs, step=float(raster_params["polyline_step_mm"]))
     markers = build_markers(segs, tape_w, gates)
 
     xs = [p.x for p in pts] + [m[0] for m in markers]
     ys = [p.y for p in pts] + [m[1] for m in markers]
     if not xs or not ys:
         raise RuntimeError("Invalid track geometry for rasterization.")
-    minx = math.floor(min(xs) - 80.0)
-    miny = math.floor(min(ys) - 80.0)
-    maxx = math.ceil(max(xs) + 80.0)
-    maxy = math.ceil(max(ys) + 80.0)
+    margin_mm = float(raster_params["margin_mm"])
+    minx = math.floor(min(xs) - margin_mm)
+    miny = math.floor(min(ys) - margin_mm)
+    maxx = math.ceil(max(xs) + margin_mm)
+    maxy = math.ceil(max(ys) + margin_mm)
 
     W = int(maxx - minx)
     H = int(maxy - miny)
     origin_x = float(minx)
     origin_y = float(miny)
-    pixel_mm = 1.0
+    pixel_mm = float(raster_params["pixel_mm"])
 
     buf = bytearray(W * H)
     half = tape_w * 0.5
@@ -259,6 +323,16 @@ def ensure_track_raster(track_path: str, track: TrackSpec, segs: list, tape_w: f
                 if (abs(t) <= half_l) and (abs(w) <= half_w):
                     buf[py * W + px] = 255
 
-    meta = {"origin_x": origin_x, "origin_y": origin_y, "W": W, "H": H, "pixel_mm": pixel_mm}
+    meta = {
+        "format": RMAP_FORMAT,
+        "version": RMAP_VERSION,
+        "fingerprint": expected_fingerprint,
+        "raster_params": raster_params,
+        "origin_x": origin_x,
+        "origin_y": origin_y,
+        "W": W,
+        "H": H,
+        "pixel_mm": pixel_mm,
+    }
     _rmap_save(rpath, meta, bytes(buf))
     return {"path": rpath, "meta": meta, "data": bytes(buf)}

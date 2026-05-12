@@ -13,6 +13,7 @@ from typing import Any
 from Utils.robot_spec import RobotSpec
 from Utils.simulation_config import SimulationConfig, derive_runtime_params
 from Utils.simulation_state import SimulationResult, SimulationState
+from Utils.robot_runtime import robot_local_to_world
 from Utils.track_spec import TrackSpec
 from sim.native_linesim import CPoint, get_linesim
 from sim.track_runtime import (
@@ -218,7 +219,7 @@ class SimulationEngine:
 
         self.v_final = float(self.params.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.tau = max(0.001, min(0.100, float(self.params.get("motor_time_constant_s", 0.01))))
-        self.dt_s = max(0.0005, min(0.1, float(self.params.get("simulation_step_dt_ms", 1.0)) / 1000.0))
+        self.dt_s = float(config.dt_s)
 
         self.sensor_mode = self.params.get("sensor_mode", "analog")
         self.sensor_bits = int(self.params.get("sensor_bits", 8))
@@ -234,7 +235,6 @@ class SimulationEngine:
 
         gm = robot.geometric_mechanical
         self._phys = {
-            "use": bool(self.params.get("use_motor_dc_model", False)),
             "Vb": float(self.params.get("V_batt_nom_V", 7.4)),
             "Rb": float(self.params.get("R_batt_ohm", 0.05)),
             "Rw": float(self.params.get("R_wiring_ohm", 0.02)),
@@ -288,14 +288,12 @@ class SimulationEngine:
         return pos
 
     def _sensors_world_xy(self, x: float, y: float, h_deg: float) -> tuple[list[float], list[float]]:
-        ang = math.radians(h_deg)
-        ox, oy = self.robot.origin_x_mm, self.robot.origin_y_mm
         sx: list[float] = []
         sy: list[float] = []
-        for s in self.robot.sensors:
-            rx, ry = rot(s.x_mm - ox, s.y_mm - oy, ang)
-            sx.append(x + rx)
-            sy.append(y + ry)
+        for sensor in self.robot.sensors:
+            wx, wy = robot_local_to_world(self.robot, x, y, h_deg, sensor.x_mm, sensor.y_mm)
+            sx.append(wx)
+            sy.append(wy)
         return sx, sy
 
     def _coverage_from_raster_batch(self, sx: list[float], sy: list[float], size_mm: float, grid_n: int = 3) -> list[float]:
@@ -476,8 +474,7 @@ class SimulationEngine:
 
             try:
                 if self._rmap_ptr and self._rmap_meta:
-                    cx = x_mm - self.robot.origin_x_mm
-                    cy = y_mm - self.robot.origin_y_mm
+                    cx, cy = robot_local_to_world(self.robot, x_mm, y_mm, h_deg, 0.0, 0.0)
                     hit = native.envelope_contacts_raster_C(
                         c_double(cx), c_double(cy), c_double(math.radians(h_deg)),
                         c_double(env_w), c_double(env_h),

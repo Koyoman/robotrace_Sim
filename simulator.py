@@ -30,6 +30,7 @@ from Utils.track_geometry import (
 )
 from Utils.track_spec import TrackSpec
 from Utils.validation import ValidationError
+from Utils.robot_runtime import robot_local_to_world
 from sim.controller_loader import ControllerLoadError, load_controller
 from sim.track_runtime import (
     curvature_change_markers, ensure_track_raster, oriented_rect,
@@ -588,8 +589,7 @@ class MainWindow(QMainWindow):
 
         self.anim_items["wheels"] = []
         for wdef in self.robot.wheels:
-            rx, ry = rot(wdef.x_mm + self.robot.origin_x_mm, wdef.y_mm + self.robot.origin_y_mm, ang)
-            px, py = pos.p.x + rx, pos.p.y + ry
+            px, py = robot_local_to_world(self.robot, pos.p.x, pos.p.y, pos.headingDeg, wdef.x_mm, wdef.y_mm)
             half_w = float(getattr(wdef, 'width_mm', WHEEL_W_MM)) * 0.5
             half_h = float(getattr(wdef, 'height_mm', WHEEL_H_MM)) * 0.5
             corners = [(-half_w, -half_h), ( half_w, -half_h), ( half_w,  half_h), (-half_w,  half_h)]

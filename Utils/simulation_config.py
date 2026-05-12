@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from Utils.robot_spec import RobotSpec
+from Utils.robot_runtime import derive_wheel_track_mm
 from Utils.validation import ValidationError, as_bool, as_float, as_int, raise_if_errors
 
 
@@ -24,8 +25,6 @@ class SimulationConfig:
     value_of_background: int = 255
     analog_noise_line: int = 50
     analog_noise_background: int = 50
-
-    use_motor_dc_model: bool = True
 
     @property
     def dt_s(self) -> float:
@@ -50,7 +49,6 @@ class SimulationConfig:
             value_of_background=as_int(obj.get("value_of_background", 255), "$.value_of_background", 255, errors),
             analog_noise_line=as_int(obj.get("analog_noise_line", 50), "$.analog_noise_line", 50, errors),
             analog_noise_background=as_int(obj.get("analog_noise_background", 50), "$.analog_noise_background", 50, errors),
-            use_motor_dc_model=as_bool(obj.get("use_motor_dc_model", True), "$.use_motor_dc_model", True, errors),
         )
         errors.extend(cfg.validate())
         raise_if_errors("Configuração de simulação inválida.", errors)
@@ -79,7 +77,6 @@ class SimulationConfig:
             value_of_background=sens.value_of_background,
             analog_noise_line=sens.analog_noise_line,
             analog_noise_background=sens.analog_noise_background,
-            use_motor_dc_model=True,
         )
 
     def validate(self) -> list[str]:
@@ -111,7 +108,7 @@ def derive_runtime_params(robot: RobotSpec, config: SimulationConfig | None = No
     ctrl = robot.controller
 
     wheel_r_m = gm.wheel_radius_mm / 1000.0
-    track_m = gm.track_mm / 1000.0 if gm.track_mm > 0 else 0.07
+    track_m = derive_wheel_track_mm(robot) / 1000.0
     mass_kg = gm.mass_kg
     jz = gm.J_body_kgm2
     if jz <= 0.0:
@@ -155,7 +152,6 @@ def derive_runtime_params(robot: RobotSpec, config: SimulationConfig | None = No
         "value_of_background": cfg.value_of_background,
         "analog_noise_line": cfg.analog_noise_line,
         "analog_noise_background": cfg.analog_noise_background,
-        "use_motor_dc_model": cfg.use_motor_dc_model,
         "V_batt_nom_V": elec.battery_voltage_v,
         "R_batt_ohm": elec.r_batt_ohm,
         "R_wiring_ohm": elec.wiring_r_ohm,
