@@ -19,7 +19,8 @@ from PySide6.QtGui import QPen, QColor, QPainterPath, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
     QFileDialog, QLabel, QSplitter, QGraphicsView,
-    QGraphicsScene, QMessageBox, QComboBox, QCheckBox, QVBoxLayout, QHBoxLayout, QSizePolicy
+    QGraphicsScene, QMessageBox, QComboBox, QCheckBox, QVBoxLayout, QHBoxLayout, QSizePolicy,
+    QDialog, QDialogButtonBox, QDoubleSpinBox, QGroupBox
 )
 
 from Utils.robot_spec import RobotSpec
@@ -88,6 +89,120 @@ class SimView(QGraphicsView):
         self.scale(s, s)
         e.accept()
 
+
+class CustomPhysicsDialog(QDialog):
+    """Single dialog for all custom physics options exposed by Phase 3."""
+
+    def __init__(self, parent=None, *, settings: dict[str, Any] | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Custom physics settings")
+        self.setModal(True)
+        self.setMinimumWidth(430)
+        self._settings = dict(settings or {})
+
+        layout = QVBoxLayout(self)
+
+        model_group = QGroupBox("Drivetrain model")
+        model_layout = QVBoxLayout(model_group)
+        self.chk_use_dc = QCheckBox("Use DC motor model / native backend")
+        self.chk_use_dc.setToolTip(
+            "Enabled: custom uses the same DC/C model as Realistic.\n"
+            "Disabled: custom uses the Python kinematic model."
+        )
+        model_layout.addWidget(self.chk_use_dc)
+        layout.addWidget(model_group)
+
+        kin_group = QGroupBox("Kinematic options")
+        kin_layout = QFormLayout(kin_group)
+        self.chk_use_accel = QCheckBox("Use wheel acceleration limit")
+        self.chk_use_accel.setToolTip(
+            "Only used when the DC motor model is disabled.\n"
+            "When disabled, wheel speed jumps directly to the PWM target."
+        )
+        kin_layout.addRow(self.chk_use_accel)
+
+        self.chk_auto_speed = QCheckBox("Auto from robot")
+        self.chk_auto_speed.setToolTip(
+            "When checked, the full-PWM wheel speed is derived from battery, motor, gear ratio and wheel radius."
+        )
+        self.spin_speed = QDoubleSpinBox()
+        self.spin_speed.setRange(1.0, 100000.0)
+        self.spin_speed.setDecimals(3)
+        self.spin_speed.setSingleStep(50.0)
+        self.spin_speed.setSuffix(" mm/s")
+        speed_row = QWidget()
+        speed_layout = QHBoxLayout(speed_row); speed_layout.setContentsMargins(0, 0, 0, 0)
+        speed_layout.addWidget(self.chk_auto_speed)
+        speed_layout.addWidget(self.spin_speed)
+        kin_layout.addRow("Max wheel speed", speed_row)
+
+        self.chk_auto_accel = QCheckBox("Auto from robot")
+        self.chk_auto_accel.setToolTip(
+            "When checked, the acceleration limit is derived from the robot friction estimate."
+        )
+        self.spin_accel = QDoubleSpinBox()
+        self.spin_accel.setRange(1.0, 1000000.0)
+        self.spin_accel.setDecimals(3)
+        self.spin_accel.setSingleStep(500.0)
+        self.spin_accel.setSuffix(" mm/s²")
+        accel_row = QWidget()
+        accel_layout = QHBoxLayout(accel_row); accel_layout.setContentsMargins(0, 0, 0, 0)
+        accel_layout.addWidget(self.chk_auto_accel)
+        accel_layout.addWidget(self.spin_accel)
+        kin_layout.addRow("Max wheel acceleration", accel_row)
+        layout.addWidget(kin_group)
+
+        note = QLabel(
+            "These values are applied when you start the next simulation. "
+            "They do not change a simulation that is already running."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #888888;")
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.chk_use_dc.toggled.connect(self._update_enabled)
+        self.chk_auto_speed.toggled.connect(self._update_enabled)
+        self.chk_auto_accel.toggled.connect(self._update_enabled)
+        self._load_settings(self._settings)
+        self._update_enabled()
+
+    def _load_settings(self, settings: dict[str, Any]) -> None:
+        self.chk_use_dc.setChecked(bool(settings.get("custom_use_dc_motor_model", True)))
+        self.chk_use_accel.setChecked(bool(settings.get("custom_use_acceleration_limit", True)))
+
+        speed = settings.get("basic_max_wheel_speed_mm_s", None)
+        self.chk_auto_speed.setChecked(speed is None)
+        self.spin_speed.setValue(float(speed if speed is not None else 500.0))
+
+        accel = settings.get("basic_max_wheel_accel_mm_s2", None)
+        self.chk_auto_accel.setChecked(accel is None)
+        self.spin_accel.setValue(float(accel if accel is not None else 9810.0))
+
+    def _update_enabled(self) -> None:
+        use_kinematic = not self.chk_use_dc.isChecked()
+        self.chk_use_accel.setEnabled(use_kinematic)
+        self.chk_auto_speed.setEnabled(use_kinematic)
+        self.spin_speed.setEnabled(use_kinematic and not self.chk_auto_speed.isChecked())
+        self.chk_auto_accel.setEnabled(use_kinematic and self.chk_use_accel.isChecked())
+        self.spin_accel.setEnabled(
+            use_kinematic and self.chk_use_accel.isChecked() and not self.chk_auto_accel.isChecked()
+        )
+
+    def settings(self) -> dict[str, Any]:
+        return {
+            "custom_use_dc_motor_model": self.chk_use_dc.isChecked(),
+            "custom_use_acceleration_limit": self.chk_use_accel.isChecked(),
+            "basic_max_wheel_speed_mm_s": None if self.chk_auto_speed.isChecked() else float(self.spin_speed.value()),
+            "basic_max_wheel_accel_mm_s2": None if self.chk_auto_accel.isChecked() else float(self.spin_accel.value()),
+        }
+
 class MainWindow(QMainWindow):
     """Main GUI: loads files, starts simulation, and replays results."""
     def __init__(self):
@@ -145,6 +260,26 @@ class MainWindow(QMainWindow):
         self.chk_log = QCheckBox("Save logs to file (CSV+JSON)")
         self.chk_log.setToolTip("If enabled, write CSV + JSON logs under the Logs/ folder for each run.")
 
+        self.combo_physics = QComboBox()
+        self.combo_physics.addItem("Realistic", "realistic")
+        self.combo_physics.addItem("Basic", "basic")
+        self.combo_physics.addItem("Ideal", "ideal")
+        self.combo_physics.addItem("Custom", "custom")
+        self.combo_physics.setCurrentIndex(0)
+        self.combo_physics.setToolTip("Physics profile used by SimulationEngine. Default keeps the current DC backend behavior.")
+
+        self.custom_physics_settings = {
+            "custom_use_dc_motor_model": True,
+            "custom_use_acceleration_limit": True,
+            "basic_max_wheel_speed_mm_s": None,
+            "basic_max_wheel_accel_mm_s2": None,
+        }
+        self.btn_custom_physics = QPushButton("Custom settings…")
+        self.btn_custom_physics.setToolTip("Configure all custom physics options used on the next simulation run.")
+        self.lbl_custom_physics = QLabel("")
+        self.lbl_custom_physics.setWordWrap(True)
+        self.lbl_custom_physics.setStyleSheet("color: #888888;")
+
         self.combo_speed = QComboBox()
         self.combo_speed.addItems(["0.1×", "0.5×", "1×", "2×", "4×"])
         self.combo_speed.setToolTip("Playback speed for visualization only. It does not affect the physics or logged data.")
@@ -181,6 +316,12 @@ class MainWindow(QMainWindow):
         row_track_layout.addWidget(self.lbl_track_status)
         form.addRow(row_track)
         form.addRow(self.chk_log)
+        physics_row = QWidget()
+        physics_layout = QHBoxLayout(physics_row); physics_layout.setContentsMargins(0, 0, 0, 0)
+        physics_layout.addWidget(self.combo_physics)
+        physics_layout.addWidget(self.btn_custom_physics)
+        form.addRow("Physics profile", physics_row)
+        form.addRow("Custom physics", self.lbl_custom_physics)
         self.btn_reload = QPushButton("Reload files")
         self.btn_reload.setToolTip("Reload the last loaded track, robot, and controller from disk (no dialogs). Useful when tuning the PID/controller to grab the latest code and JSONs.")
         form.addRow(self.btn_reload)
@@ -246,6 +387,9 @@ class MainWindow(QMainWindow):
         self.btn_stop.clicked.connect(self.on_stop)
         self.btn_replay.clicked.connect(self.on_replay)
         self.btn_replay_stop.clicked.connect(self.on_stop_replay)
+        self.combo_physics.currentIndexChanged.connect(self.on_physics_profile_changed)
+        self.btn_custom_physics.clicked.connect(self.on_configure_custom_physics)
+        self.on_physics_profile_changed()
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
@@ -603,6 +747,61 @@ class MainWindow(QMainWindow):
             item.setBrush(WHEEL_BRUSH)
             self.anim_items["wheels"].append(item)
 
+    def _current_physics_profile(self) -> str:
+        return str(self.combo_physics.currentData() or "realistic").strip().lower()
+
+    def _custom_physics_summary(self) -> str:
+        st = self.custom_physics_settings
+        if bool(st.get("custom_use_dc_motor_model", True)):
+            return "DC motor model enabled: custom uses the native C drivetrain, same base path as Realistic."
+
+        speed = st.get("basic_max_wheel_speed_mm_s", None)
+        accel = st.get("basic_max_wheel_accel_mm_s2", None)
+        accel_on = bool(st.get("custom_use_acceleration_limit", True))
+        speed_text = "auto wheel speed" if speed is None else f"max wheel speed {float(speed):.1f} mm/s"
+        if accel_on:
+            accel_text = "auto acceleration" if accel is None else f"max acceleration {float(accel):.1f} mm/s²"
+        else:
+            accel_text = "no acceleration limit"
+        return f"Kinematic model: {speed_text}, {accel_text}."
+
+    def _update_custom_physics_summary(self) -> None:
+        is_custom = self._current_physics_profile() == "custom"
+        self.btn_custom_physics.setEnabled(is_custom)
+        self.lbl_custom_physics.setVisible(is_custom)
+        if is_custom:
+            self.lbl_custom_physics.setText(self._custom_physics_summary())
+        else:
+            self.lbl_custom_physics.setText("Only used when Physics profile is Custom.")
+
+    def on_physics_profile_changed(self, *_args) -> None:
+        self._update_custom_physics_summary()
+
+    def on_configure_custom_physics(self) -> None:
+        dialog = CustomPhysicsDialog(self, settings=self.custom_physics_settings)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.custom_physics_settings = dialog.settings()
+            self._update_custom_physics_summary()
+
+    def _apply_custom_physics_settings(self, cfg: SimulationConfig) -> None:
+        """Copy UI-selected custom settings into the config used by the next worker."""
+        if str(cfg.physics_profile).strip().lower() != "custom":
+            return
+        st = self.custom_physics_settings
+        cfg.custom_use_dc_motor_model = bool(st.get("custom_use_dc_motor_model", True))
+        cfg.custom_use_acceleration_limit = bool(st.get("custom_use_acceleration_limit", True))
+        cfg.basic_max_wheel_speed_mm_s = st.get("basic_max_wheel_speed_mm_s", None)
+        cfg.basic_max_wheel_accel_mm_s2 = st.get("basic_max_wheel_accel_mm_s2", None)
+
+    def _build_simulation_config(self) -> SimulationConfig:
+        if self.robot is None:
+            return SimulationConfig()
+        cfg = SimulationConfig.from_robot_spec(self.robot)
+        cfg.save_logs = self.chk_log.isChecked()
+        cfg.physics_profile = self._current_physics_profile()
+        self._apply_custom_physics_settings(cfg)
+        return cfg
+
     def on_simulate(self):
         self.streaming = True
         if not (self.track and self.robot):
@@ -625,8 +824,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.btn_replay.setEnabled(False)
 
-        cfg = SimulationConfig.from_robot_spec(self.robot)
-        cfg.save_logs = self.chk_log.isChecked()
+        cfg = self._build_simulation_config()
         p = derive_runtime_params(self.robot, cfg)
         self.v_max_mm_s = float(p.get("final_linear_speed_mps", 2.0)) * 1000.0
         self.sim_dt_s = max(0.0005, min(0.1, float(p.get("simulation_step_dt_ms", 1.0)) / 1000.0))
@@ -650,7 +848,7 @@ class MainWindow(QMainWindow):
         self.worker.start(QThread.TimeCriticalPriority)
 
     def _speed_color(self, v_mm_s: float) -> QColor:
-        vmax = max(1e-6, float(self.v_max_mm_s or (self.spin_vf.value()*1000.0)))
+        vmax = max(1e-6, float(self.v_max_mm_s or 1000.0))
         t = max(0.0, min(1.0, v_mm_s / vmax))
         if t <= 0.5:
             u = t / 0.5

@@ -7,7 +7,7 @@ import os
 import random
 import time
 from collections.abc import Callable, Iterator
-from ctypes import byref, c_double, c_int
+from ctypes import c_double, c_int
 from typing import Any
 
 from Utils.robot_spec import RobotSpec
@@ -16,6 +16,7 @@ from Utils.simulation_state import SimulationResult, SimulationState
 from Utils.robot_runtime import robot_local_to_world
 from Utils.track_spec import TrackSpec
 from sim.native_linesim import CPoint, get_linesim
+from sim.physics.factory import create_physics_model
 from sim.track_runtime import (
     build_markers,
     ensure_track_raster,
@@ -217,8 +218,6 @@ class SimulationEngine:
         if config.random_seed is not None:
             random.seed(config.random_seed)
 
-        self.v_final = float(self.params.get("final_linear_speed_mps", 2.0)) * 1000.0
-        self.tau = max(0.001, min(0.100, float(self.params.get("motor_time_constant_s", 0.01))))
         self.dt_s = float(config.dt_s)
 
         self.sensor_mode = self.params.get("sensor_mode", "analog")
@@ -233,36 +232,7 @@ class SimulationEngine:
         self.logger = SimLogger(root_dir) if do_logs else NoopLogger()
         self._linesim = None
 
-        gm = robot.geometric_mechanical
-        self._phys = {
-            "Vb": float(self.params.get("V_batt_nom_V", 7.4)),
-            "Rb": float(self.params.get("R_batt_ohm", 0.05)),
-            "Rw": float(self.params.get("R_wiring_ohm", 0.02)),
-            "Vdrop": float(self.params.get("driver_drop_V", 0.2)),
-            "Rm": float(self.params.get("Rm_ohm", 3.0)),
-            "Lm": float(self.params.get("Lm_H", 0.0001)),
-            "Kt": float(self.params.get("Kt_Nm_per_A", 0.0015)),
-            "Ke": float(self.params.get("Ke_V_per_rad", 1.0 / 500.0)),
-            "gear": float(self.params.get("gear_ratio", 1.0)),
-            "eta": float(self.params.get("eta_drive", 0.9)),
-            "Jm": float(self.params.get("Jm_kgm2", 1e-8)),
-            "Jload": float(self.params.get("Jload_kgm2", 0.0)),
-            "b": float(self.params.get("b_visc_Nm_per_radps", 0.0)),
-            "tau_c": float(self.params.get("tau_coulomb_Nm", 0.0)),
-            "Imax": float(self.params.get("I_max_A", 3.0)),
-            "mass": float(self.params.get("mass_kg", 0.2)),
-            "track": float(self.params.get("track_m", 0.07)),
-            "r": float(self.params.get("wheel_r_m", 0.011)),
-            "Jz": float(self.params.get("Jz_kgm2", 1e-4)),
-            "Crr": float(self.params.get("Crr", 0.005)),
-            "rho": float(self.params.get("rho_air", 1.225)),
-            "CdA": float(self.params.get("CdA", 0.02)),
-            "mu_static": float(gm.mu_static),
-            "mu_kinetic": float(gm.mu_kinetic),
-            "pwm_max": float(self.params.get("pwm_max", 4095)),
-            "pwm_min": float(self.params.get("pwm_min", -4095)),
-            "deadband_percent": float(self.params.get("deadband_percent", 0.0)),
-        }
+        self.physics_model = create_physics_model(config, robot=robot, params=self.params)
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -360,38 +330,44 @@ class SimulationEngine:
         return segs, origin, tape_w
 
     def iter_chunks(self, chunk_size: int = 200) -> Iterator[list[dict[str, Any]]]:
-        segs, origin, tape_w = self._prepare_track_geometry()
-        tape_half = float(tape_w) * 0.5
-        native = self._native()
+        self._prepare_track_geometry()
 
         start_pose = self._initial_pose()
-        x_mm, y_mm, h_deg = start_pose.p.x, start_pose.p.y, float(start_pose.headingDeg)
         dt = float(self.dt_s)
         t_ms = 0
+
+        current_state = SimulationState(
+            t_ms=t_ms,
+            x_mm=start_pose.p.x,
+            y_mm=start_pose.p.y,
+            heading_deg=float(start_pose.headingDeg),
+            v_mm_s=0.0,
+            omega_rad_s=0.0,
+            a_lin_mm_s2=0.0,
+            alpha_rad_s2=0.0,
+            v_left_mm_s=0.0,
+            v_right_mm_s=0.0,
+            sensors=[],
+        )
+        self.physics_model.reset(current_state)
+
+        native = self._native() if self.physics_model.requires_native else None
 
         zone = None
         if self._gates:
             (sa, sb, _shdg_run, _shdg_base), (fa, fb, *_rest) = self._gates
             zone = FinishZoneChecker(sa, sb, fa, fb)
-            zone.prime(x_mm, y_mm)
+            zone.prime(current_state.x_mm, current_state.y_mm)
 
         chunk_buf: list[dict[str, Any]] = []
 
         env_w = float(self.robot.envelope.width_mm)
         env_h = float(self.robot.envelope.height_mm)
         sensor_half = float(self.robot.sensors[0].size_mm) * 0.5 if self.robot.sensors else 2.5
-
-        v_mm_s = 0.0; w_rad_s = 0.0
-        prev_v_mm_s = 0.0; prev_w_rad_s = 0.0
-        vL_mm_s = 0.0; vR_mm_s = 0.0
-
-        x_m, y_m = x_mm / 1000.0, y_mm / 1000.0
-        h_rad = math.radians(h_deg)
-        v_mps = 0.0; w_radps = 0.0; IL = 0.0; IR = 0.0
         max_time_ms = int(float(self.params.get("max_time_s", 100.0)) * 1000.0)
 
         while not self.cancelled:
-            sx, sy = self._sensors_world_xy(x_mm, y_mm, h_deg)
+            sx, sy = self._sensors_world_xy(current_state.x_mm, current_state.y_mm, current_state.heading_deg)
             cov = self._coverage_from_raster_batch(sx, sy, sensor_half * 2.0, grid_n=3)
             sn_vals = [sensor_value_from_coverage(
                 cov[i], self.sensor_mode, self.sensor_bits,
@@ -399,84 +375,55 @@ class SimulationEngine:
                 self.analog_noise_line, self.analog_noise_background,
             ) for i in range(len(cov))]
 
-            a_lin = (v_mm_s - prev_v_mm_s) / max(1e-9, dt)
-            a_ang = (w_rad_s - prev_w_rad_s) / max(1e-9, dt)
-
-            state = SimulationState(
+            controller_state = SimulationState(
                 t_ms=t_ms,
-                x_mm=x_mm,
-                y_mm=y_mm,
-                heading_deg=h_deg,
-                v_mm_s=v_mm_s,
-                omega_rad_s=w_rad_s,
-                a_lin_mm_s2=a_lin,
-                alpha_rad_s2=a_ang,
-                v_left_mm_s=vL_mm_s,
-                v_right_mm_s=vR_mm_s,
+                x_mm=current_state.x_mm,
+                y_mm=current_state.y_mm,
+                heading_deg=current_state.heading_deg,
+                v_mm_s=current_state.v_mm_s,
+                omega_rad_s=current_state.omega_rad_s,
+                a_lin_mm_s2=current_state.a_lin_mm_s2,
+                alpha_rad_s2=current_state.alpha_rad_s2,
+                v_left_mm_s=current_state.v_left_mm_s,
+                v_right_mm_s=current_state.v_right_mm_s,
+                pwm_left=current_state.pwm_left,
+                pwm_right=current_state.pwm_right,
                 sensors=sn_vals,
             )
 
             try:
-                out = self.controller_fn(state.to_controller_state(dt))
+                out = self.controller_fn(controller_state.to_controller_state(dt))
                 pwm_l = int(out.get("pwm_left", 1500)) if isinstance(out, dict) else 1500
                 pwm_r = int(out.get("pwm_right", 1500)) if isinstance(out, dict) else 1500
             except Exception as e:
                 print(f"[Controller Error] {e}")
                 pwm_l, pwm_r = 1500, 1500
 
-            prev_v_mm_s, prev_w_rad_s = v_mm_s, w_rad_s
-            px_prev, py_prev, h_prev = x_mm, y_mm, h_deg
-
-            ox = c_double(); oy = c_double(); oh = c_double()
-            ov = c_double(); ow = c_double(); oIL = c_double(); oIR = c_double()
-
-            self._phys["pwm_min"] = float(self._phys.get("pwm_min", -4095.0))
-            self._phys["pwm_max"] = float(self._phys.get("pwm_max", 4095.0))
-            neutral_raw = self.params.get("pwm_neutral", None)
-            if neutral_raw is None:
-                pcenter = 0.5 * (self._phys["pwm_min"] + self._phys["pwm_max"])
-            else:
-                pcenter = float(neutral_raw)
-            deadband = float(self._phys.get("deadband_percent", 0.0)) * 0.01
-
-            native.step_motor_drivetrain_C(
-                c_double(x_mm / 1000.0), c_double(y_mm / 1000.0), c_double(h_rad),
-                c_double(v_mps), c_double(w_radps), c_double(IL), c_double(IR),
-                c_int(pwm_l), c_int(pwm_r),
-                c_double(self._phys["pwm_min"]), c_double(self._phys["pwm_max"]), c_double(pcenter), c_double(deadband),
-                c_double(self._phys["Vb"]), c_double(self._phys["Rb"]), c_double(self._phys["Rw"]), c_double(self._phys["Vdrop"]),
-                c_double(self._phys["Rm"]), c_double(self._phys["Lm"]), c_double(self._phys["Kt"]), c_double(self._phys["Ke"]),
-                c_double(self._phys.get("b", 0.0)), c_double(self._phys.get("tau_c", 0.0)),
-                c_double(self._phys["gear"]), c_double(self._phys["eta"]),
-                c_double(self._phys["mass"]), c_double(self._phys["track"]), c_double(self._phys["r"]), c_double(self._phys["Jz"]),
-                c_double(self._phys["Crr"]), c_double(self._phys["rho"]), c_double(self._phys["CdA"]),
-                c_double(self._phys.get("mu_static", 1.0)), c_double(self._phys.get("mu_kinetic", 0.8)),
-                c_double(self._phys["Imax"]),
-                c_double(dt),
-                byref(ox), byref(oy), byref(oh), byref(ov), byref(ow), byref(oIL), byref(oIR),
+            px_prev, py_prev, h_prev = current_state.x_mm, current_state.y_mm, current_state.heading_deg
+            next_state = self.physics_model.step(
+                controller_state,
+                pwm_l,
+                pwm_r,
+                dt,
+                self.robot,
+                self.config,
+                native=native,
             )
-
-            x_mm = ox.value * 1000.0
-            y_mm = oy.value * 1000.0
-            h_rad = oh.value
-            h_deg = math.degrees(h_rad)
-            v_mps = ov.value
-            w_radps = ow.value
-            IL = oIL.value
-            IR = oIR.value
-
-            vL_mps = v_mps - 0.5 * w_radps * self._phys["track"]
-            vR_mps = v_mps + 0.5 * w_radps * self._phys["track"]
-            vL_mm_s = vL_mps * 1000.0
-            vR_mm_s = vR_mps * 1000.0
-            v_mm_s = v_mps * 1000.0
-            w_rad_s = w_radps
+            current_state = next_state
 
             try:
                 if self._rmap_ptr and self._rmap_meta:
-                    cx, cy = robot_local_to_world(self.robot, x_mm, y_mm, h_deg, 0.0, 0.0)
-                    hit = native.envelope_contacts_raster_C(
-                        c_double(cx), c_double(cy), c_double(math.radians(h_deg)),
+                    collision_native = native if native is not None else self._native()
+                    cx, cy = robot_local_to_world(
+                        self.robot,
+                        current_state.x_mm,
+                        current_state.y_mm,
+                        current_state.heading_deg,
+                        0.0,
+                        0.0,
+                    )
+                    hit = collision_native.envelope_contacts_raster_C(
+                        c_double(cx), c_double(cy), c_double(math.radians(current_state.heading_deg)),
                         c_double(env_w), c_double(env_h),
                         self._rmap_ptr, c_int(self._rmap_meta["W"]), c_int(self._rmap_meta["H"]),
                         c_double(self._rmap_meta["origin_x"]), c_double(self._rmap_meta["origin_y"]), c_double(self._rmap_meta["pixel_mm"]),
@@ -488,31 +435,33 @@ class SimulationEngine:
 
             finished = False
             if zone is not None:
-                finished = zone.update((px_prev, py_prev, h_prev), (x_mm, y_mm, h_deg), env_w, env_h, t_ms)
+                finished = zone.update(
+                    (px_prev, py_prev, h_prev),
+                    (current_state.x_mm, current_state.y_mm, current_state.heading_deg),
+                    env_w,
+                    env_h,
+                    t_ms,
+                )
 
-            step_state = SimulationState(
-                t_ms=t_ms,
-                x_mm=x_mm,
-                y_mm=y_mm,
-                heading_deg=h_deg,
-                v_mm_s=v_mm_s,
-                omega_rad_s=w_rad_s,
-                a_lin_mm_s2=a_lin,
-                alpha_rad_s2=a_ang,
-                v_left_mm_s=vL_mm_s,
-                v_right_mm_s=vR_mm_s,
-                pwm_left=pwm_l,
-                pwm_right=pwm_r,
+            step = current_state.to_step_dict()
+            self.logger.log_step(
+                t_ms,
+                current_state.x_mm,
+                current_state.y_mm,
+                current_state.heading_deg,
+                current_state.v_mm_s,
+                current_state.omega_rad_s,
+                pwm_l,
+                pwm_r,
                 sensors=sn_vals,
             )
-            step = step_state.to_step_dict()
-            self.logger.log_step(t_ms, x_mm, y_mm, h_deg, v_mm_s, w_rad_s, pwm_l, pwm_r, sensors=sn_vals)
             chunk_buf.append(step)
             if len(chunk_buf) >= chunk_size:
                 yield chunk_buf
                 chunk_buf = []
 
             t_ms += int(round(dt * 1000.0))
+            current_state.t_ms = t_ms
             if finished or (self._rmap_ptr and not hit):
                 break
             if t_ms > max_time_ms:

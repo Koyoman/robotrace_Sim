@@ -325,6 +325,16 @@ LINESIM_API void step_motor_drivetrain_C(
 {
     if (dt <= 0.0) dt = 1e-3;
 
+    /* Keep the public function tolerant of both SI units and legacy mm inputs.
+       deriv_dc already normalizes these, but the exact current update below also
+       needs the normalized values. */
+    double track_m = track;
+    double r_m = r;
+    if (track_m > 2.0) track_m *= 0.001;
+    if (r_m > 1.0)     r_m     *= 0.001;
+    track_m = fmax(1e-12, track_m);
+    r_m = fmax(1e-12, r_m);
+
     Deriv k1 = deriv_dc(x,y,h,v,w,IL,IR,
                         pwmL,pwmR,pmin,pmax,pcenter,deadband,
                         Vb,Rb,Rw,Vdrop,
@@ -363,10 +373,10 @@ LINESIM_API void step_motor_drivetrain_C(
     const double tau_e = Lm / fmax(1e-12, Rm);
     const double v_mid = v;
     const double w_mid = w;
-    const double vL_mid = v_mid - 0.5*w_mid*track;
-    const double vR_mid = v_mid + 0.5*w_mid*track;
-    const double omg_mL_mid = gear * (vL_mid / fmax(1e-12, r));
-    const double omg_mR_mid = gear * (vR_mid / fmax(1e-12, r));
+    const double vL_mid = v_mid - 0.5*w_mid*track_m;
+    const double vR_mid = v_mid + 0.5*w_mid*track_m;
+    const double omg_mL_mid = gear * (vL_mid / r_m);
+    const double omg_mR_mid = gear * (vR_mid / r_m);
 
     const double dutyL = pwm_to_duty(pwmL, pmin, pmax, pcenter, deadband);
     const double dutyR = pwm_to_duty(pwmR, pmin, pmax, pcenter, deadband);

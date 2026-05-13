@@ -10,6 +10,9 @@ from Utils.robot_runtime import derive_wheel_track_mm
 from Utils.validation import ValidationError, as_bool, as_float, as_int, raise_if_errors
 
 
+VALID_PHYSICS_PROFILES = {"ideal", "basic", "realistic", "custom"}
+
+
 @dataclass(slots=True)
 class SimulationConfig:
     final_linear_speed_mps: float = 2.0
@@ -18,6 +21,15 @@ class SimulationConfig:
     max_time_s: float = 100.0
     save_logs: bool = False
     random_seed: int | None = None
+
+    physics_profile: str = "realistic"
+    # None means "auto": derive a full-PWM wheel speed from the robot motor/battery data.
+    # Explicit numeric values are still accepted for deterministic experiments.
+    ideal_max_wheel_speed_mm_s: float | None = None
+    basic_max_wheel_speed_mm_s: float | None = None
+    basic_max_wheel_accel_mm_s2: float | None = None
+    custom_use_dc_motor_model: bool = True
+    custom_use_acceleration_limit: bool = True
 
     sensor_mode: str = "analog"
     sensor_bits: int = 8
@@ -43,6 +55,21 @@ class SimulationConfig:
             max_time_s=as_float(obj.get("max_time_s", 100.0), "$.max_time_s", 100.0, errors),
             save_logs=as_bool(obj.get("save_logs", False), "$.save_logs", False, errors),
             random_seed=None if seed_raw is None else as_int(seed_raw, "$.random_seed", 0, errors),
+            physics_profile=str(obj.get("physics_profile", "realistic")).strip().lower(),
+            ideal_max_wheel_speed_mm_s=(
+                None if obj.get("ideal_max_wheel_speed_mm_s", None) is None
+                else as_float(obj.get("ideal_max_wheel_speed_mm_s"), "$.ideal_max_wheel_speed_mm_s", None, errors)
+            ),
+            basic_max_wheel_speed_mm_s=(
+                None if obj.get("basic_max_wheel_speed_mm_s", None) is None
+                else as_float(obj.get("basic_max_wheel_speed_mm_s"), "$.basic_max_wheel_speed_mm_s", None, errors)
+            ),
+            basic_max_wheel_accel_mm_s2=(
+                None if obj.get("basic_max_wheel_accel_mm_s2", None) is None
+                else as_float(obj.get("basic_max_wheel_accel_mm_s2"), "$.basic_max_wheel_accel_mm_s2", None, errors)
+            ),
+            custom_use_dc_motor_model=as_bool(obj.get("custom_use_dc_motor_model", True), "$.custom_use_dc_motor_model", True, errors),
+            custom_use_acceleration_limit=as_bool(obj.get("custom_use_acceleration_limit", True), "$.custom_use_acceleration_limit", True, errors),
             sensor_mode=str(obj.get("sensor_mode", "analog")).lower(),
             sensor_bits=as_int(obj.get("sensor_bits", 8), "$.sensor_bits", 8, errors),
             value_of_line=as_int(obj.get("value_of_line", 0), "$.value_of_line", 0, errors),
@@ -89,6 +116,15 @@ class SimulationConfig:
             errors.append("simulation_step_dt_ms deve ser > 0.")
         if self.max_time_s <= 0:
             errors.append("max_time_s deve ser > 0.")
+        if self.physics_profile not in VALID_PHYSICS_PROFILES:
+            expected = ", ".join(sorted(VALID_PHYSICS_PROFILES))
+            errors.append(f"Invalid physics_profile {self.physics_profile!r}. Expected one of: {expected}.")
+        if self.ideal_max_wheel_speed_mm_s is not None and self.ideal_max_wheel_speed_mm_s <= 0:
+            errors.append("ideal_max_wheel_speed_mm_s deve ser > 0 quando informado.")
+        if self.basic_max_wheel_speed_mm_s is not None and self.basic_max_wheel_speed_mm_s <= 0:
+            errors.append("basic_max_wheel_speed_mm_s deve ser > 0 quando informado.")
+        if self.basic_max_wheel_accel_mm_s2 is not None and self.basic_max_wheel_accel_mm_s2 <= 0:
+            errors.append("basic_max_wheel_accel_mm_s2 deve ser > 0 quando informado.")
         if self.sensor_mode not in {"analog", "digital"}:
             errors.append("sensor_mode deve ser 'analog' ou 'digital'.")
         if not (1 <= self.sensor_bits <= 16):
@@ -120,10 +156,24 @@ def derive_runtime_params(robot: RobotSpec, config: SimulationConfig | None = No
     kv_rad_per_v = (motor.Kv_rpm_per_V * 2.0 * math.pi) / 60.0 if motor.Kv_rpm_per_V > 0 else 0.0
     ke = 1.0 / kv_rad_per_v if kv_rad_per_v > 1e-12 else 1.0 / 500.0
 
-    rpm_no_load = 10000.0
-    wheel_rps = (rpm_no_load / max(1.0, gear)) / 60.0
-    v_mps = wheel_rps * (2.0 * math.pi * wheel_r_m) * max(0.1, min(1.0, eta))
+    # Estimate the full-duty no-load wheel speed using the same motor constants
+    # used by the DC model. This keeps the ideal/basic profiles on the same
+    # velocity scale as the realistic profile instead of relying on an arbitrary
+    # fixed 500 mm/s fallback.
+    available_voltage = max(0.0, float(elec.battery_voltage_v) - float(elec.driver_drop_v))
+    if ke > 1e-12 and gear > 1e-12:
+        motor_no_load_rad_s = available_voltage / ke
+        v_mps = (motor_no_load_rad_s / gear) * wheel_r_m
+    else:
+        rpm_no_load = 10000.0
+        wheel_rps = (rpm_no_load / max(1.0, gear)) / 60.0
+        v_mps = wheel_rps * (2.0 * math.pi * wheel_r_m)
     v_mps = max(0.1, min(20.0, float(v_mps)))
+
+    # A safe acceleration estimate for the basic kinematic profile.  It is not
+    # a detailed tire model; it only prevents the default from being so sluggish
+    # that the robot cannot turn at realistic speeds.
+    max_wheel_accel_mps2 = max(5.0, min(30.0, float(gm.mu_static) * 9.81))
 
     tau_s = cfg.motor_time_constant_s
     try:
@@ -139,6 +189,8 @@ def derive_runtime_params(robot: RobotSpec, config: SimulationConfig | None = No
 
     return {
         "final_linear_speed_mps": v_mps or cfg.final_linear_speed_mps,
+        "motor_no_load_wheel_speed_mps": v_mps,
+        "basic_max_wheel_accel_mps2": max_wheel_accel_mps2,
         "motor_time_constant_s": tau_s,
         "simulation_step_dt_ms": cfg.simulation_step_dt_ms,
         "max_time_s": cfg.max_time_s,

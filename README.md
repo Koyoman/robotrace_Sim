@@ -19,7 +19,8 @@ In the simulator:
 1. Load a track JSON, for example `Example/Track/track_1_cw.json`.
 2. Load a robot JSON, for example `Example/Robot/robot-spec.json`.
 3. Load a controller, for example `Example/Controller/P_basic.py` or `Example/Controller/PID_basic.py`.
-4. Click **Start**.
+4. Choose a physics profile if needed. The default is **Realistic**.
+5. Click **Start**.
 
 ## Files used by the simulator
 
@@ -111,13 +112,110 @@ When a track is loaded, the simulator compares the expected fingerprint with the
 
 Do not edit `.rmap` files manually. Edit the track JSON instead.
 
-## Active physics path
+## Physics profiles
 
-The current active physics path is the C drivetrain/backend exposed by `step_motor_drivetrain_C` in `linesim.dll`.
+Physics is selected by `SimulationConfig.physics_profile`. Existing flows remain compatible because the default is:
 
-The Python engine passes drivetrain, battery, motor, mass, wheel radius, wheel track, friction and timestep values to the C backend. The public C API and function signatures are not changed by the Python refactor.
+```python
+physics_profile = "realistic"
+```
 
-The previous/legacy simple physics switch is not exposed as a runtime option in this version. The stale `use_motor_dc_model` configuration flag was removed from `SimulationConfig` because it did not select a different code path. This avoids a misleading half-active physics option. New physics choices should be added later as explicit, tested options.
+Accepted profiles:
+
+| Profile | Model | Behavior | Native backend |
+|---|---|---|---|
+| `ideal` | `IdealPhysicsModel` | Converts PWM directly to wheel speed and updates pose with differential-drive kinematics. There is no inertia or gradual acceleration. | No |
+| `basic` | `BasicKinematicPhysicsModel` | Converts PWM to target wheel speed, applies a simple wheel acceleration limit, then updates pose with differential-drive kinematics. | No |
+| `realistic` | `DCMotorPhysicsModel` | Preserves the previous simulator behavior by calling the existing C drivetrain path exposed as `step_motor_drivetrain_C`. | Yes |
+| `custom` | factory-selected | Uses explicit supported flags. By default it behaves like `realistic`; if `custom_use_dc_motor_model=False`, it uses the basic kinematic model and `custom_use_acceleration_limit` controls the acceleration limit. | Depends on flags |
+
+### Physics configuration fields
+
+`SimulationConfig` includes these fields:
+
+```python
+physics_profile: str = "realistic"
+ideal_max_wheel_speed_mm_s: float | None = None
+basic_max_wheel_speed_mm_s: float | None = None
+basic_max_wheel_accel_mm_s2: float | None = None
+custom_use_dc_motor_model: bool = True
+custom_use_acceleration_limit: bool = True
+```
+
+For `ideal_max_wheel_speed_mm_s`, `basic_max_wheel_speed_mm_s` and
+`basic_max_wheel_accel_mm_s2`, `None` means automatic derivation from the
+loaded robot spec. This is important because the ideal/basic profiles must use
+the same order of magnitude as the DC model. With the example N20 robot, the
+full-PWM no-load wheel speed is derived from battery voltage, driver drop, motor
+`Kv`/`Ke`, gear ratio and wheel radius instead of using a fixed 500 mm/s
+fallback. Explicit numeric values are still supported when a deterministic
+experiment needs a manually chosen scale.
+
+The `custom_*` flags are intentionally limited to behavior implemented in this phase:
+
+- `custom_use_dc_motor_model=True`: use the current DC/native model.
+- `custom_use_dc_motor_model=False`: use the basic kinematic model.
+- `custom_use_acceleration_limit=True`: when the custom profile is using the basic kinematic model, wheel speeds change gradually.
+- `custom_use_acceleration_limit=False`: when the custom profile is using the basic kinematic model, wheel speeds jump directly to the target speed.
+
+When the simulator UI is used, selecting **Custom** enables the **Custom settings…** button.
+That dialog is the single place where the user can choose the currently supported
+custom physics options for the next run:
+
+- whether Custom uses the DC/native drivetrain or the Python kinematic drivetrain;
+- whether the kinematic drivetrain uses an acceleration limit;
+- whether the kinematic max wheel speed is automatic or manually overridden;
+- whether the kinematic max wheel acceleration is automatic or manually overridden.
+
+The dialog values are stored in the main window and copied into `SimulationConfig`
+immediately before creating the `SimWorker`. Therefore changes made by the user are
+not applied to a simulation that is already running; they are applied to the next
+press of **Start**. The worker then passes the same config into `SimulationEngine`,
+and the factory in `sim/physics/factory.py` creates the selected model from those
+values.
+
+No decorative physics flags were added for features not implemented in this phase.
+
+### Native C backend compatibility
+
+The public C API remains compatible. The signature of `step_motor_drivetrain_C` was not changed. The realistic profile still calls the native DC drivetrain through `sim/physics/dc_motor.py`.
+
+One robustness fix was made inside `linesim.c`: the exact current update in `step_motor_drivetrain_C` now uses the same normalized SI-unit wheel radius and track width as the derivative calculation. Python already passes these values in meters, so this does not explain the large step-count difference by itself; it only prevents incorrect behavior if the C function is called directly with legacy millimeter values.
+
+On Linux/macOS development environments, `sim/native_linesim.py` can also load `utills_c/liblinesim.so` or `utills_c/linesim.so` before falling back to `linesim.dll`. Windows still uses `linesim.dll`.
+
+The Python engine now delegates motion updates to a model created by `sim/physics/factory.py`. The engine remains responsible for controller calls, sensor updates, finish/collision checks, chunk emission and logging.
+
+### Why ideal/basic no longer use a fixed 500 mm/s scale
+
+The original Phase 3 implementation used `500 mm/s` as the full-scale wheel
+speed for `ideal` and `basic`. With `P_basic.py`, the base PWM is `1000`, and
+the robot controller range is `-4095..4095`. Therefore the ideal/basic profiles
+were running at roughly:
+
+```text
+1000 / 4095 * 500 mm/s ≈ 122 mm/s
+```
+
+The realistic DC model does not use that fixed scale. It derives motor speed
+from the robot JSON electrical and motor parameters, so the same PWM produces a
+wheel speed around five times higher for the example robot. This was the main
+reason for the observed difference between about 39,700 steps in ideal/basic and
+about 8,200 steps in realistic.
+
+The fix was to let ideal/basic derive their default full-PWM scale from the same
+robot parameters used by the DC model.
+
+### Current physics limitations
+
+This phase modularizes physics selection. It does not add:
+
+- sensor noise beyond the existing sensor value noise path;
+- battery state-of-charge simulation;
+- wheel slip/derrapagem;
+- tire model;
+- lateral dynamics;
+- new collision physics.
 
 ## Logging and replay
 
@@ -155,7 +253,13 @@ RobotraceSim/
 │   ├── worker.py
 │   ├── controller_loader.py
 │   ├── track_runtime.py
-│   └── native_linesim.py
+│   ├── native_linesim.py
+│   └── physics/
+│       ├── base.py
+│       ├── ideal.py
+│       ├── kinematic.py
+│       ├── dc_motor.py
+│       └── factory.py
 ├── Example/
 │   ├── Controller/
 │   ├── Robot/
@@ -164,6 +268,32 @@ RobotraceSim/
 ├── utills_c/
 └── Logs/
 ```
+
+
+## Building the native C backend
+
+The repository includes the existing Windows `utills_c/linesim.dll`. If you
+change `utills_c/linesim.c`, rebuild the native library for your platform before
+running the `realistic` profile.
+
+Linux/macOS development build:
+
+```bash
+cd utills_c
+gcc -shared -fPIC -O2 -o liblinesim.so linesim.c -lm
+```
+
+Windows MinGW-w64 example:
+
+```bat
+cd utills_c
+x86_64-w64-mingw32-gcc -shared -O2 -DLINESIM_EXPORTS -o linesim.dll linesim.c -Wl,--out-implib,linesim.lib
+```
+
+Helper scripts are available as:
+
+- `utills_c/build_linesim_linux.sh`
+- `utills_c/build_linesim_windows_mingw.bat`
 
 ## Testing
 
@@ -183,7 +313,7 @@ On PowerShell, prefer `compileall` as shown above instead of `python -m py_compi
 
 ## Current limitations
 
-- This phase corrects inconsistencies only; it does not add new physics.
-- The active simulation path depends on the native `linesim.dll` backend.
+- The `realistic` profile depends on the native `linesim.dll` backend.
+- The `ideal` and `basic` profiles are deterministic Python models intended for debugging and controller iteration.
 - `.rmap` files are cache files and may be regenerated at any time.
-- Physics-module selection is intentionally not exposed until separate implementations are explicit, tested and documented.
+- Advanced physics such as battery discharge, slip, tire modeling and lateral dynamics are intentionally outside this phase.
