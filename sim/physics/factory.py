@@ -7,7 +7,7 @@ from Utils.simulation_config import SimulationConfig, VALID_PHYSICS_PROFILES
 from Utils.validation import ValidationError
 
 from sim.physics.base import PhysicsModel
-from sim.physics.dc_motor import DCMotorPhysicsModel
+from sim.physics.custom import CustomPhysicsModel, RealisticPhysicsModel
 from sim.physics.ideal import IdealPhysicsModel
 from sim.physics.kinematic import BasicKinematicPhysicsModel
 
@@ -29,9 +29,6 @@ def create_physics_model(
     if profile == "basic":
         return BasicKinematicPhysicsModel(use_acceleration_limit=True, params=params)
     if profile == "realistic":
-        return DCMotorPhysicsModel(robot=robot, params=params)
+        return RealisticPhysicsModel(config=config, robot=robot, params=params)
 
-    # custom: only expose flags that currently have a real effect.
-    if config.custom_use_dc_motor_model:
-        return DCMotorPhysicsModel(robot=robot, params=params)
-    return BasicKinematicPhysicsModel(use_acceleration_limit=config.custom_use_acceleration_limit, params=params)
+    return CustomPhysicsModel(config=config, robot=robot, params=params)

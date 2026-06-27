@@ -408,3 +408,396 @@ LINESIM_API void step_motor_drivetrain_C(
     if (oIL) *oIL = IL;
     if (oIR) *oIR = IR;
 }
+
+LINESIM_API int linesim_abi_version_C(void)
+{
+    return LINESIM_ABI_VERSION;
+}
+
+LINESIM_API const char* linesim_backend_name_C(void)
+{
+    return "linesim_c_modular_phase4_4";
+}
+
+static inline double clamp_abs(double v, double limit)
+{
+    if (limit <= 0.0) return v;
+    return clamp(v, -limit, limit);
+}
+
+static inline double round_half_away(double v)
+{
+    return (v >= 0.0) ? floor(v + 0.5) : ceil(v - 0.5);
+}
+
+typedef struct {
+    double duty;
+    double omega_wheel0;
+    double omega_wheel;
+    double alpha_wheel;
+    double current_signed;
+    double current_abs;
+    double tau_em;
+    double tau_visc;
+    double tau_coul;
+    double tau_net;
+    double tau_wheel_drive;
+    double tau_rolling;
+    double tau_bearing;
+    double tau_ground;
+    double tau_slip_loss;
+    double f_cmd;
+    double f_ground;
+    double f_max;
+    double saturation;
+    double lambda_long;
+    double lateral_force;
+    double lateral_slip;
+    double friction_usage;
+    double combined_limit;
+    double slip;
+    double surface_speed_mm_s;
+    double ground_speed_mm_s;
+    double j_eq;
+    double copper_loss;
+    double driver_loss;
+    double mech_friction_loss;
+    double rolling_loss;
+    double tire_slip_loss;
+    double brake_loss;
+    double motor_voltage;
+    double back_emf;
+} WheelCalc;
+
+static WheelCalc wheel_step(
+    double pwm, double prev_current, double prev_omega_wheel,
+    double prev_ground_speed_mm_s, double other_prev_ground_speed_mm_s,
+    const PhysicsConfigC* cfg, double terminal_v, double fz, double f_lat,
+    double mu_static, double mu_kinetic, double dt)
+{
+    WheelCalc w;
+    for (unsigned i=0; i<sizeof(WheelCalc); ++i) ((unsigned char*)&w)[i] = 0;
+
+    double r = fmax(1e-12, cfg->wheel_radius_m);
+    double gear = fmax(1e-12, cfg->gear_ratio);
+    double eta = fmax(1e-12, cfg->drivetrain_efficiency);
+    double Rm = fmax(1e-12, cfg->rm_ohm);
+    double Lm = fmax(0.0, cfg->lm_h);
+    double Ke = cfg->ke_v_per_rad;
+    double Kt = cfg->kt_nm_per_a;
+    double pmin = cfg->pwm_min, pmax = cfg->pwm_max, pcenter = cfg->pwm_center;
+    if (pmax <= pmin) { pmin = -4095.0; pmax = 4095.0; pcenter = 0.0; }
+    double span = fmax(fabs(pmax - pcenter), fabs(pcenter - pmin));
+    double deadband = cfg->motor_deadzone_pwm > 0.0 ? clamp(cfg->motor_deadzone_pwm / fmax(1.0, span), 0.0, 0.95) : 0.0;
+    w.duty = pwm_to_duty((int)pwm, pmin, pmax, pcenter, deadband);
+
+    w.omega_wheel0 = prev_omega_wheel;
+    if (fabs(w.omega_wheel0) < 1e-12 && fabs(prev_ground_speed_mm_s) > 1e-12) {
+        w.omega_wheel0 = (prev_ground_speed_mm_s * 0.001) / r;
+    }
+
+    double omega_motor = w.omega_wheel0 * gear;
+    w.back_emf = Ke * omega_motor;
+    double driver_available_v = fmax(0.0, terminal_v - fmax(0.0, cfg->driver_drop_v));
+    w.motor_voltage = w.duty * driver_available_v;
+    double i_inf = (w.motor_voltage - w.back_emf) / Rm;
+    if (Lm > 1e-12) {
+        double tau_e = Lm / Rm;
+        double decay = exp(-dt / fmax(1e-12, tau_e));
+        w.current_signed = i_inf + (prev_current - i_inf) * decay;
+    } else {
+        w.current_signed = i_inf;
+    }
+    w.current_signed = clamp_abs(w.current_signed, cfg->current_limit_a);
+    w.current_abs = fabs(w.current_signed);
+
+    w.tau_em = Kt * w.current_signed;
+    w.tau_visc = cfg->viscous_friction * omega_motor;
+    if (fabs(omega_motor) > 1e-9) {
+        w.tau_coul = cfg->coulomb_friction * sgn(omega_motor);
+    } else {
+        w.tau_coul = fmin(fabs(w.tau_em), fabs(cfg->coulomb_friction)) * sgn(w.tau_em);
+    }
+    w.tau_net = w.tau_em - w.tau_visc - w.tau_coul;
+    w.tau_wheel_drive = w.tau_net * gear * eta;
+    w.f_cmd = w.tau_wheel_drive / r;
+
+    double frr = fmax(0.0, cfg->crr) * fz;
+    w.tau_rolling = frr * r * (fabs(w.omega_wheel0) > 1e-9 ? sgn(w.omega_wheel0) : sgn(w.f_cmd));
+    w.tau_bearing = 0.0;
+
+    w.f_max = fmax(0.0, mu_static) * fz;
+    double f_lat_abs = fabs(f_lat);
+    double combined = w.f_max;
+    if (cfg->use_combined_friction_limit && f_lat_abs < w.f_max) {
+        combined = sqrt(fmax(0.0, w.f_max*w.f_max - f_lat_abs*f_lat_abs));
+    } else if (cfg->use_combined_friction_limit && f_lat_abs >= w.f_max) {
+        combined = 0.0;
+    }
+    w.combined_limit = combined;
+    double denom_limit = fmax(1e-12, cfg->use_combined_friction_limit ? combined : w.f_max);
+    double force_after_rr = w.f_cmd - frr * (fabs(w.omega_wheel0) > 1e-9 ? sgn(w.omega_wheel0) : sgn(w.f_cmd));
+    w.lambda_long = fabs(force_after_rr) / denom_limit;
+
+    double slip_max = clamp(cfg->slip_max_ratio > 0.0 ? cfg->slip_max_ratio : 0.95, 0.0, 0.99);
+    if (cfg->use_wheel_slip) {
+        if (cfg->use_continuous_slip) {
+            if (w.lambda_long <= 1.0) {
+                w.slip = cfg->slip_stiffness_factor * w.lambda_long * w.lambda_long;
+            } else {
+                w.slip = cfg->slip_at_limit + (1.0 - denom_limit / fmax(fabs(force_after_rr), 1e-12));
+            }
+            w.slip = clamp(w.slip, 0.0, slip_max);
+        } else {
+            w.slip = clamp(cfg->slip_ratio_left, 0.0, slip_max);
+        }
+    }
+    if (cfg->use_lateral_slip) {
+        double lat_usage = f_lat_abs / fmax(w.f_max, 1e-12);
+        if (lat_usage > 1.0) w.lateral_slip = clamp(lat_usage - 1.0, 0.0, slip_max);
+        else w.lateral_slip = 0.03 * lat_usage * lat_usage;
+        w.slip = clamp(w.slip + 0.25 * w.lateral_slip, 0.0, slip_max);
+    }
+
+    double ground_limit = cfg->use_combined_friction_limit ? combined : w.f_max;
+    double kinetic_limit = fmax(0.0, mu_kinetic) * fz;
+    if (ground_limit <= 0.0) ground_limit = 0.0;
+    if (fabs(force_after_rr) <= ground_limit) {
+        w.f_ground = force_after_rr;
+    } else {
+        double lim = fmin(fmax(0.0, ground_limit), fmax(0.0, kinetic_limit));
+        if (lim <= 0.0) lim = ground_limit;
+        w.f_ground = sgn(force_after_rr) * lim;
+    }
+    w.saturation = fabs(force_after_rr) > ground_limit + 1e-9 ? 1.0 : 0.0;
+    w.friction_usage = sqrt(w.f_cmd*w.f_cmd + f_lat*f_lat) / fmax(w.f_max, 1e-12);
+    w.lateral_force = f_lat;
+    w.tau_ground = w.f_ground * r;
+    w.tau_slip_loss = (w.f_cmd - w.f_ground) * r;
+
+    double wheel_mass = cfg->wheel_mass_kg > 0.0 ? cfg->wheel_mass_kg : fmax(0.001, 0.03 * cfg->mass_kg);
+    double j_wheel = 0.5 * wheel_mass * r * r;
+    w.j_eq = fmax(1e-12, cfg->j_load_kgm2 + cfg->j_motor_kgm2 * gear * gear + j_wheel);
+    double torque_for_alpha = cfg->use_wheel_dynamics ? (w.tau_wheel_drive - w.tau_rolling - w.tau_bearing) : (w.tau_ground);
+    w.alpha_wheel = torque_for_alpha / w.j_eq;
+    w.omega_wheel = w.omega_wheel0 + w.alpha_wheel * dt;
+    if (!cfg->use_wheel_dynamics) {
+        double target = (prev_ground_speed_mm_s * 0.001) / r;
+        w.omega_wheel = target;
+        w.alpha_wheel = (w.omega_wheel - w.omega_wheel0) / fmax(1e-12, dt);
+    }
+    w.surface_speed_mm_s = w.omega_wheel * r * 1000.0;
+    w.ground_speed_mm_s = w.surface_speed_mm_s * (1.0 - w.slip);
+
+    w.copper_loss = w.current_abs * w.current_abs * Rm;
+    w.driver_loss = w.current_abs * fmax(0.0, cfg->driver_drop_v);
+    w.mech_friction_loss = fabs(w.tau_visc * omega_motor) + fabs(w.tau_coul * omega_motor);
+    w.rolling_loss = fabs(frr * (w.ground_speed_mm_s * 0.001));
+    w.tire_slip_loss = fabs(w.f_cmd - w.f_ground) * fabs((w.surface_speed_mm_s - w.ground_speed_mm_s) * 0.001);
+    double mech_power = w.tau_wheel_drive * w.omega_wheel;
+    w.brake_loss = (w.tau_wheel_drive * w.omega_wheel < 0.0) ? fabs(mech_power) : 0.0;
+
+    return w;
+}
+
+LINESIM_API int step_physics_modular_C(
+    const PhysicsInputC* input,
+    const PhysicsConfigC* cfg,
+    PhysicsStateC* st,
+    PhysicsTelemetryC* telem)
+{
+    if (!input || !cfg || !st || !telem) return 1;
+    for (unsigned i=0; i<sizeof(PhysicsTelemetryC); ++i) ((unsigned char*)telem)[i] = 0;
+
+    double dt = cfg->dt_s > 0.0 ? cfg->dt_s : 1e-3;
+    double track_m = cfg->track_m > 1e-12 ? cfg->track_m : 0.07;
+    double wheel_r_m = cfg->wheel_radius_m > 1e-12 ? cfg->wheel_radius_m : 0.011;
+    double mass = fmax(1e-9, cfg->mass_kg);
+    double jz = cfg->jz_kgm2 > 1e-12 ? cfg->jz_kgm2 : fmax(1e-6, mass * track_m * track_m / 12.0);
+    double prev_v = st->v_mm_s;
+    double prev_w = st->omega_rad_s;
+    double prev_ke = 0.5 * mass * pow(prev_v * 0.001, 2.0) + 0.5 * jz * prev_w * prev_w;
+
+    double source_v = input->ocv_voltage_v > 0.0 ? input->ocv_voltage_v : cfg->battery_voltage_v;
+    if (source_v <= 0.0) source_v = cfg->battery_nominal_voltage_v;
+    if (source_v <= 0.0) source_v = 7.4;
+    double soc = st->battery_soc;
+    if (soc < 0.0 || soc > 1.0) soc = clamp(cfg->battery_soc, 0.0, 1.0);
+    double min_v = fmax(0.0, cfg->battery_min_voltage_v);
+    double ocv = cfg->use_battery_model ? (min_v + soc * fmax(0.0, source_v - min_v)) : source_v;
+    double prev_current_abs = fabs(st->current_left_a) + fabs(st->current_right_a);
+    double terminal_v_est = fmax(min_v, ocv - prev_current_abs * fmax(0.0, cfg->r_batt_ohm + cfg->wiring_r_ohm));
+
+    double fz = mass * 9.81 * 0.5;
+    double v_body_mps = st->v_mm_s * 0.001;
+    double lateral_accel_mps2 = v_body_mps * st->omega_rad_s;
+    double f_lat_total = cfg->use_lateral_slip ? mass * lateral_accel_mps2 : 0.0;
+    double f_lat_each = 0.5 * f_lat_total;
+
+    double mu_sl = cfg->mu_static_left > 0.0 ? cfg->mu_static_left : cfg->mu_static;
+    double mu_sr = cfg->mu_static_right > 0.0 ? cfg->mu_static_right : cfg->mu_static;
+    double mu_kl = cfg->mu_kinetic_left > 0.0 ? cfg->mu_kinetic_left : cfg->mu_kinetic;
+    double mu_kr = cfg->mu_kinetic_right > 0.0 ? cfg->mu_kinetic_right : cfg->mu_kinetic;
+
+    WheelCalc L, R;
+    if (cfg->use_dc_motor_model) {
+        L = wheel_step(input->pwm_left, st->current_left_a, st->omega_wheel_left_rad_s, st->v_left_mm_s, st->v_right_mm_s, cfg, terminal_v_est, fz, f_lat_each, mu_sl, mu_kl, dt);
+        R = wheel_step(input->pwm_right, st->current_right_a, st->omega_wheel_right_rad_s, st->v_right_mm_s, st->v_left_mm_s, cfg, terminal_v_est, fz, f_lat_each, mu_sr, mu_kr, dt);
+    } else {
+        double pmin=cfg->pwm_min, pmax=cfg->pwm_max, pc=cfg->pwm_center;
+        if (pmax <= pmin) { pmin=-4095.0; pmax=4095.0; pc=0.0; }
+        double max_speed = cfg->max_wheel_speed_mm_s > 0.0 ? cfg->max_wheel_speed_mm_s : 500.0;
+        for (unsigned i=0; i<sizeof(WheelCalc); ++i) { ((unsigned char*)&L)[i]=0; ((unsigned char*)&R)[i]=0; }
+        L.duty = pwm_to_duty((int)input->pwm_left, pmin, pmax, pc, 0.0);
+        R.duty = pwm_to_duty((int)input->pwm_right, pmin, pmax, pc, 0.0);
+        L.surface_speed_mm_s = L.ground_speed_mm_s = L.duty * max_speed;
+        R.surface_speed_mm_s = R.ground_speed_mm_s = R.duty * max_speed;
+        L.omega_wheel = L.surface_speed_mm_s * 0.001 / wheel_r_m;
+        R.omega_wheel = R.surface_speed_mm_s * 0.001 / wheel_r_m;
+        L.alpha_wheel = (L.omega_wheel - st->omega_wheel_left_rad_s)/fmax(1e-12,dt);
+        R.alpha_wheel = (R.omega_wheel - st->omega_wheel_right_rad_s)/fmax(1e-12,dt);
+        double wheel_mass = cfg->wheel_mass_kg > 0.0 ? cfg->wheel_mass_kg : fmax(0.001, 0.03 * mass);
+        L.j_eq = R.j_eq = fmax(1e-12, cfg->j_load_kgm2 + cfg->j_motor_kgm2*cfg->gear_ratio*cfg->gear_ratio + 0.5*wheel_mass*wheel_r_m*wheel_r_m);
+    }
+
+    if (cfg->use_acceleration_limit && cfg->max_wheel_accel_mm_s2 > 0.0) {
+        double max_delta = cfg->max_wheel_accel_mm_s2 * dt;
+        double gl0 = st->v_left_mm_s;
+        double gr0 = st->v_right_mm_s;
+        L.ground_speed_mm_s = gl0 + clamp(L.ground_speed_mm_s - gl0, -max_delta, max_delta);
+        R.ground_speed_mm_s = gr0 + clamp(R.ground_speed_mm_s - gr0, -max_delta, max_delta);
+        L.surface_speed_mm_s = L.ground_speed_mm_s / fmax(1e-9, 1.0 - L.slip);
+        R.surface_speed_mm_s = R.ground_speed_mm_s / fmax(1e-9, 1.0 - R.slip);
+        L.omega_wheel = L.surface_speed_mm_s * 0.001 / wheel_r_m;
+        R.omega_wheel = R.surface_speed_mm_s * 0.001 / wheel_r_m;
+    }
+
+    double v = 0.5 * (L.ground_speed_mm_s + R.ground_speed_mm_s);
+    double omega = (R.ground_speed_mm_s - L.ground_speed_mm_s) / fmax(1e-9, track_m * 1000.0);
+    double h0 = st->heading_deg * M_PI / 180.0;
+    double h_mid = h0 + 0.5 * omega * dt;
+    st->x_mm += v * cos(h_mid) * dt;
+    st->y_mm += v * sin(h_mid) * dt;
+    st->heading_deg = (h0 + omega * dt) * 180.0 / M_PI;
+    st->v_left_mm_s = L.ground_speed_mm_s;
+    st->v_right_mm_s = R.ground_speed_mm_s;
+    st->v_mm_s = v;
+    st->omega_rad_s = omega;
+    st->a_lin_mm_s2 = (v - prev_v) / fmax(1e-12, dt);
+    st->alpha_rad_s2 = (omega - prev_w) / fmax(1e-12, dt);
+    st->current_left_a = L.current_signed;
+    st->current_right_a = R.current_signed;
+    st->omega_wheel_left_rad_s = L.omega_wheel;
+    st->omega_wheel_right_rad_s = R.omega_wheel;
+    st->alpha_wheel_left_rad_s2 = L.alpha_wheel;
+    st->alpha_wheel_right_rad_s2 = R.alpha_wheel;
+
+    double battery_current = fabs(L.current_signed) + fabs(R.current_signed);
+    if (cfg->use_battery_model) {
+        double capacity_as = fmax(1e-9, cfg->battery_capacity_mah * 3.6);
+        soc = clamp(soc - battery_current * dt / capacity_as, 0.0, 1.0);
+        ocv = min_v + soc * fmax(0.0, source_v - min_v);
+    }
+    double rb = cfg->r_batt_ohm > 0.0 ? cfg->r_batt_ohm : cfg->battery_internal_resistance_ohm;
+    double rw = fmax(0.0, cfg->wiring_r_ohm);
+    double terminal_v = fmax(min_v, ocv - battery_current * (rb + rw));
+    st->battery_soc = soc;
+    st->battery_voltage_v = terminal_v;
+
+    if (cfg->use_encoder_model) {
+        double ticks_per_rad = ((double)(cfg->encoder_ticks_per_rev > 0 ? cfg->encoder_ticks_per_rev : 1)) / (2.0 * M_PI);
+        double dl = L.omega_wheel * dt * ticks_per_rad;
+        double dr = R.omega_wheel * dt * ticks_per_rad;
+        if (cfg->encoder_quantization) { dl = round_half_away(dl); dr = round_half_away(dr); }
+        st->enc_left_delta_ticks = dl;
+        st->enc_right_delta_ticks = dr;
+        st->enc_left_ticks += dl;
+        st->enc_right_ticks += dr;
+    } else {
+        st->enc_left_delta_ticks = 0.0;
+        st->enc_right_delta_ticks = 0.0;
+    }
+
+    if (cfg->use_imu_model) {
+        st->imu_omega_rad_s = st->omega_rad_s;
+        st->imu_alpha_rad_s2 = st->alpha_rad_s2;
+        st->imu_accel_x_mm_s2 = st->a_lin_mm_s2;
+        st->imu_accel_y_mm_s2 = st->v_mm_s * st->omega_rad_s;
+    } else {
+        st->imu_omega_rad_s = 0.0;
+        st->imu_alpha_rad_s2 = 0.0;
+        st->imu_accel_x_mm_s2 = 0.0;
+        st->imu_accel_y_mm_s2 = 0.0;
+    }
+
+    double battery_power = terminal_v * battery_current;
+    double internal_loss = battery_current*battery_current*rb;
+    double wiring_loss = battery_current*battery_current*rw;
+    double rolling_loss = L.rolling_loss + R.rolling_loss;
+    double tire_loss = L.tire_slip_loss + R.tire_slip_loss;
+    double copper_loss = L.copper_loss + R.copper_loss;
+    double driver_loss = L.driver_loss + R.driver_loss;
+    double mech_loss = L.mech_friction_loss + R.mech_friction_loss;
+    double brake_loss = L.brake_loss + R.brake_loss;
+
+    st->battery_energy_j += battery_power * dt;
+    st->copper_loss_energy_j += copper_loss * dt;
+    st->driver_loss_energy_j += driver_loss * dt;
+    st->battery_internal_loss_energy_j += internal_loss * dt;
+    st->wiring_loss_energy_j += wiring_loss * dt;
+    st->mechanical_friction_loss_energy_j += mech_loss * dt;
+    st->rolling_resistance_energy_j += rolling_loss * dt;
+    st->tire_slip_loss_energy_j += tire_loss * dt;
+    st->brake_dissipated_energy_j += brake_loss * dt;
+
+    double ke_linear = 0.5 * mass * pow(st->v_mm_s * 0.001, 2.0);
+    double ke_angular = 0.5 * jz * st->omega_rad_s * st->omega_rad_s;
+    double ke_wheels = 0.5 * L.j_eq * L.omega_wheel * L.omega_wheel + 0.5 * R.j_eq * R.omega_wheel * R.omega_wheel;
+    double total_ke = ke_linear + ke_angular + ke_wheels;
+    double total_losses = st->copper_loss_energy_j + st->driver_loss_energy_j + st->battery_internal_loss_energy_j + st->wiring_loss_energy_j + st->mechanical_friction_loss_energy_j + st->rolling_resistance_energy_j + st->tire_slip_loss_energy_j + st->brake_dissipated_energy_j;
+    double balance = st->battery_energy_j - (total_losses + total_ke);
+
+    telem->duty_left = L.duty; telem->duty_right = R.duty;
+    telem->current_left_a = fabs(L.current_signed); telem->current_right_a = fabs(R.current_signed); telem->battery_current_a = battery_current;
+    telem->tau_motor_em_left_nm = L.tau_em; telem->tau_motor_em_right_nm = R.tau_em;
+    telem->tau_motor_viscous_left_nm = L.tau_visc; telem->tau_motor_viscous_right_nm = R.tau_visc;
+    telem->tau_motor_coulomb_left_nm = L.tau_coul; telem->tau_motor_coulomb_right_nm = R.tau_coul;
+    telem->tau_motor_net_left_nm = L.tau_net; telem->tau_motor_net_right_nm = R.tau_net;
+    telem->tau_wheel_drive_left_nm = L.tau_wheel_drive; telem->tau_wheel_drive_right_nm = R.tau_wheel_drive;
+    telem->tau_rolling_left_nm = L.tau_rolling; telem->tau_rolling_right_nm = R.tau_rolling;
+    telem->tau_bearing_left_nm = L.tau_bearing; telem->tau_bearing_right_nm = R.tau_bearing;
+    telem->tau_ground_left_nm = L.tau_ground; telem->tau_ground_right_nm = R.tau_ground;
+    telem->tau_slip_loss_left_nm = L.tau_slip_loss; telem->tau_slip_loss_right_nm = R.tau_slip_loss;
+    telem->force_longitudinal_command_left_n = L.f_cmd; telem->force_longitudinal_command_right_n = R.f_cmd;
+    telem->force_longitudinal_ground_left_n = L.f_ground; telem->force_longitudinal_ground_right_n = R.f_ground;
+    telem->force_longitudinal_max_left_n = L.f_max; telem->force_longitudinal_max_right_n = R.f_max;
+    telem->force_longitudinal_saturation_left = L.saturation; telem->force_longitudinal_saturation_right = R.saturation;
+    telem->lambda_long_left = L.lambda_long; telem->lambda_long_right = R.lambda_long;
+    telem->lateral_accel_mm_s2 = lateral_accel_mps2 * 1000.0;
+    telem->lateral_force_total_n = f_lat_total; telem->lateral_force_left_n = L.lateral_force; telem->lateral_force_right_n = R.lateral_force;
+    telem->lateral_slip_left = L.lateral_slip; telem->lateral_slip_right = R.lateral_slip;
+    telem->friction_usage_left = L.friction_usage; telem->friction_usage_right = R.friction_usage;
+    telem->combined_friction_limit_left_n = L.combined_limit; telem->combined_friction_limit_right_n = R.combined_limit;
+    telem->slip_ratio_left = L.slip; telem->slip_ratio_right = R.slip;
+    telem->wheel_left_surface_speed_mm_s = L.surface_speed_mm_s; telem->wheel_right_surface_speed_mm_s = R.surface_speed_mm_s;
+    telem->ground_left_speed_mm_s = L.ground_speed_mm_s; telem->ground_right_speed_mm_s = R.ground_speed_mm_s;
+    telem->j_eq_left_kgm2 = L.j_eq; telem->j_eq_right_kgm2 = R.j_eq;
+    telem->battery_power_w = battery_power;
+    telem->copper_loss_left_w = L.copper_loss; telem->copper_loss_right_w = R.copper_loss;
+    telem->driver_loss_left_w = L.driver_loss; telem->driver_loss_right_w = R.driver_loss;
+    telem->battery_internal_loss_w = internal_loss; telem->wiring_loss_w = wiring_loss;
+    telem->mechanical_friction_loss_left_w = L.mech_friction_loss; telem->mechanical_friction_loss_right_w = R.mech_friction_loss;
+    telem->rolling_resistance_loss_w = rolling_loss;
+    telem->tire_slip_loss_left_w = L.tire_slip_loss; telem->tire_slip_loss_right_w = R.tire_slip_loss;
+    telem->brake_dissipated_power_w = brake_loss;
+    telem->kinetic_power_delta_w = (total_ke - prev_ke) / fmax(1e-12, dt);
+    telem->kinetic_energy_linear_j = ke_linear;
+    telem->kinetic_energy_angular_j = ke_angular;
+    telem->kinetic_energy_wheels_j = ke_wheels;
+    telem->total_kinetic_energy_j = total_ke;
+    telem->total_loss_energy_j = total_losses;
+    telem->energy_balance_error_j = balance;
+    telem->energy_balance_error_percent = (fabs(st->battery_energy_j) > 1e-12) ? 100.0 * balance / st->battery_energy_j : 0.0;
+    telem->step_executed_in_c = 1;
+    return 0;
+}

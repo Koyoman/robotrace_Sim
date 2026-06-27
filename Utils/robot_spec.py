@@ -24,6 +24,12 @@ class SensorSpec:
     x_mm: float
     y_mm: float
     size_mm: float = 5.0
+    gain: float | None = None
+    offset: float | None = None
+    noise_std: float | None = None
+    latency_ms: float | None = None
+    update_rate_Hz: float | None = None
+    filter_tau_ms: float | None = None
 
 
 @dataclass(slots=True)
@@ -68,6 +74,7 @@ class MotorTransmissionSpec:
     Rm_ohm: float = 4.0
     Lm_H: float = 0.00015
     Kv_rpm_per_V: float = 5478.655528120322
+    Kv_rad_per_V: float = 0.0
     Kt_Nm_per_A: float = 0.001743
     I0_A: float = 0.15
     b_visc_Nm_per_radps: float = 7e-08
@@ -177,6 +184,12 @@ class RobotSpec:
                 x_mm=as_float(s.get("xMM", 0.0), f"$.sensors[{i}].xMM", 0.0, errors),
                 y_mm=as_float(s.get("yMM", 0.0), f"$.sensors[{i}].yMM", 0.0, errors),
                 size_mm=size,
+                gain=None if s.get("gain") is None else as_float(s.get("gain"), f"$.sensors[{i}].gain", 1.0, errors),
+                offset=None if s.get("offset") is None else as_float(s.get("offset"), f"$.sensors[{i}].offset", 0.0, errors),
+                noise_std=None if s.get("noise_std") is None else as_float(s.get("noise_std"), f"$.sensors[{i}].noise_std", 0.0, errors),
+                latency_ms=None if s.get("latency_ms") is None else as_float(s.get("latency_ms"), f"$.sensors[{i}].latency_ms", 0.0, errors),
+                update_rate_Hz=None if s.get("update_rate_Hz") is None else as_float(s.get("update_rate_Hz"), f"$.sensors[{i}].update_rate_Hz", 0.0, errors),
+                filter_tau_ms=None if s.get("filter_tau_ms") is None else as_float(s.get("filter_tau_ms"), f"$.sensors[{i}].filter_tau_ms", 0.0, errors),
             ))
 
         gm_raw = obj.get("geometric_mechanical") or {}
@@ -232,6 +245,7 @@ class RobotSpec:
             Rm_ohm=as_float(motor_raw.get("R_motor_ohm", motor_raw.get("Rm_ohm", 4.0)), "$.motor_transmission.R_motor_ohm", 4.0, errors),
             Lm_H=as_float(motor_raw.get("L_motor_H", motor_raw.get("Lm_H", 0.00015)), "$.motor_transmission.L_motor_H", 0.00015, errors),
             Kv_rpm_per_V=as_float(motor_raw.get("Kv_rpm_per_V", 5478.655528120322), "$.motor_transmission.Kv_rpm_per_V", 5478.655528120322, errors),
+            Kv_rad_per_V=as_float(motor_raw.get("Kv_rad_per_V", 0.0), "$.motor_transmission.Kv_rad_per_V", 0.0, errors),
             Kt_Nm_per_A=as_float(motor_raw.get("Kt_Nm_per_A", 0.001743), "$.motor_transmission.Kt_Nm_per_A", 0.001743, errors),
             I0_A=as_float(motor_raw.get("I0_noLoad_A", motor_raw.get("I0_A", 0.15)), "$.motor_transmission.I0_noLoad_A", 0.15, errors),
             b_visc_Nm_per_radps=as_float(motor_raw.get("b_visc_Nm_per_radps", 7e-08), "$.motor_transmission.b_visc_Nm_per_radps", 7e-08, errors),
@@ -323,7 +337,15 @@ class RobotSpec:
                 for w in self.wheels
             ],
             "sensors": [
-                {"id": s.id, "xMM": s.x_mm, "yMM": s.y_mm, "sizeMM": s.size_mm}
+                {
+                    "id": s.id, "xMM": s.x_mm, "yMM": s.y_mm, "sizeMM": s.size_mm,
+                    **({"gain": s.gain} if s.gain is not None else {}),
+                    **({"offset": s.offset} if s.offset is not None else {}),
+                    **({"noise_std": s.noise_std} if s.noise_std is not None else {}),
+                    **({"latency_ms": s.latency_ms} if s.latency_ms is not None else {}),
+                    **({"update_rate_Hz": s.update_rate_Hz} if s.update_rate_Hz is not None else {}),
+                    **({"filter_tau_ms": s.filter_tau_ms} if s.filter_tau_ms is not None else {}),
+                }
                 for s in self.sensors
             ],
             "geometric_mechanical": {
@@ -345,6 +367,7 @@ class RobotSpec:
                 "R_motor_ohm": self.motor_transmission.Rm_ohm,
                 "L_motor_H": self.motor_transmission.Lm_H,
                 "Kv_rpm_per_V": self.motor_transmission.Kv_rpm_per_V,
+                "Kv_rad_per_V": self.motor_transmission.Kv_rad_per_V,
                 "Kt_Nm_per_A": self.motor_transmission.Kt_Nm_per_A,
                 "I0_noLoad_A": self.motor_transmission.I0_A,
                 "b_visc_Nm_per_radps": self.motor_transmission.b_visc_Nm_per_radps,

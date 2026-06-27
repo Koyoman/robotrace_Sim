@@ -98,12 +98,19 @@ class DCMotorPhysicsModel(PhysicsModel):
         ox = c_double(); oy = c_double(); oh = c_double()
         ov = c_double(); ow = c_double(); oil = c_double(); oir = c_double()
 
+        source_v = phys["Vb"]
+        if getattr(config, "custom_use_battery_model", False):
+            min_v = float(getattr(config, "custom_battery_min_voltage_v", 0.0))
+            initial_v = float(getattr(config, "custom_battery_initial_voltage_v", phys["Vb"]))
+            soc = max(0.0, min(1.0, float(getattr(state, "battery_soc", 1.0))))
+            source_v = min_v + soc * max(0.0, initial_v - min_v)
+
         native.step_motor_drivetrain_C(
             c_double(state.x_mm / 1000.0), c_double(state.y_mm / 1000.0), c_double(math.radians(state.heading_deg)),
             c_double(self._v_mps), c_double(self._w_radps), c_double(self._i_left_A), c_double(self._i_right_A),
             c_int(pwm_left), c_int(pwm_right),
             c_double(phys["pwm_min"]), c_double(phys["pwm_max"]), c_double(pwm_center), c_double(deadband),
-            c_double(phys["Vb"]), c_double(phys["Rb"]), c_double(phys["Rw"]), c_double(phys["Vdrop"]),
+            c_double(source_v), c_double(phys["Rb"]), c_double(phys["Rw"]), c_double(phys["Vdrop"]),
             c_double(phys["Rm"]), c_double(phys["Lm"]), c_double(phys["Kt"]), c_double(phys["Ke"]),
             c_double(phys.get("b", 0.0)), c_double(phys.get("tau_c", 0.0)),
             c_double(phys["gear"]), c_double(phys["eta"]),
@@ -140,4 +147,20 @@ class DCMotorPhysicsModel(PhysicsModel):
             pwm_left=int(pwm_left),
             pwm_right=int(pwm_right),
             sensors=list(state.sensors),
+            battery_voltage_v=float(source_v),
+            battery_soc=float(getattr(state, "battery_soc", 1.0)),
+            battery_current_a=abs(float(self._i_left_A)) + abs(float(self._i_right_A)),
+            current_left_a=abs(float(self._i_left_A)),
+            current_right_a=abs(float(self._i_right_A)),
+            current_total_a=abs(float(self._i_left_A)) + abs(float(self._i_right_A)),
+            motor_left_current_a=abs(float(self._i_left_A)),
+            motor_right_current_a=abs(float(self._i_right_A)),
+            motor_left_current_signed_a=float(self._i_left_A),
+            motor_right_current_signed_a=float(self._i_right_A),
+            battery_power_w=max(0.0, float(source_v)) * (abs(float(self._i_left_A)) + abs(float(self._i_right_A))),
+            wheel_left_surface_speed_mm_s=v_left_mps * 1000.0,
+            wheel_right_surface_speed_mm_s=v_right_mps * 1000.0,
+            ground_left_speed_mm_s=v_left_mps * 1000.0,
+            ground_right_speed_mm_s=v_right_mps * 1000.0,
+            physics_backend="c_legacy",
         )

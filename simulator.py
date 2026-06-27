@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QFormLayout, QPushButton,
     QFileDialog, QLabel, QSplitter, QGraphicsView,
     QGraphicsScene, QMessageBox, QComboBox, QCheckBox, QVBoxLayout, QHBoxLayout, QSizePolicy,
-    QDialog, QDialogButtonBox, QDoubleSpinBox, QGroupBox
+    QDialog, QDialogButtonBox, QDoubleSpinBox, QGroupBox, QSpinBox, QScrollArea
 )
 
 from Utils.robot_spec import RobotSpec
@@ -91,117 +91,281 @@ class SimView(QGraphicsView):
 
 
 class CustomPhysicsDialog(QDialog):
-    """Single dialog for all custom physics options exposed by Phase 3."""
+    """Single dialog for all Phase 4 custom physics options."""
 
     def __init__(self, parent=None, *, settings: dict[str, Any] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Custom physics settings")
         self.setModal(True)
-        self.setMinimumWidth(430)
+        self.setMinimumWidth(620)
+        self.resize(720, 760)
         self._settings = dict(settings or {})
 
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        scroll.setWidget(body)
+        root.addWidget(scroll)
 
-        model_group = QGroupBox("Drivetrain model")
-        model_layout = QVBoxLayout(model_group)
-        self.chk_use_dc = QCheckBox("Use DC motor model / native backend")
-        self.chk_use_dc.setToolTip(
-            "Enabled: custom uses the same DC/C model as Realistic.\n"
-            "Disabled: custom uses the Python kinematic model."
-        )
-        model_layout.addWidget(self.chk_use_dc)
+        self._checks: dict[str, QCheckBox] = {}
+        self._double: dict[str, QDoubleSpinBox] = {}
+        self._int: dict[str, QSpinBox] = {}
+
+        def add_check(key: str, text: str, parent_layout: QFormLayout | QVBoxLayout) -> QCheckBox:
+            chk = QCheckBox(text)
+            self._checks[key] = chk
+            if isinstance(parent_layout, QFormLayout):
+                parent_layout.addRow(chk)
+            else:
+                parent_layout.addWidget(chk)
+            return chk
+
+        def add_double(key: str, label: str, parent_layout: QFormLayout, *, lo=-1e9, hi=1e9, step=1.0, decimals=3, suffix="") -> QDoubleSpinBox:
+            spin = QDoubleSpinBox()
+            spin.setRange(float(lo), float(hi))
+            spin.setDecimals(decimals)
+            spin.setSingleStep(float(step))
+            if suffix:
+                spin.setSuffix(suffix)
+            self._double[key] = spin
+            parent_layout.addRow(label, spin)
+            return spin
+
+        def add_int(key: str, label: str, parent_layout: QFormLayout, *, lo=0, hi=10_000_000, step=1) -> QSpinBox:
+            spin = QSpinBox()
+            spin.setRange(int(lo), int(hi))
+            spin.setSingleStep(int(step))
+            self._int[key] = spin
+            parent_layout.addRow(label, spin)
+            return spin
+
+        model_group = QGroupBox("1. Modelo base")
+        model_layout = QFormLayout(model_group)
+        self.chk_use_dc = add_check("custom_use_dc_motor_model", "Usar modelo DC", model_layout)
+        self.chk_use_c = add_check("custom_use_c_backend", "Exigir backend C modular ABI compatível", model_layout)
+        self.chk_allow_py_fallback = add_check("custom_allow_python_fallback", "Permitir fallback Python explícito", model_layout)
+        self.chk_use_kin = add_check("custom_use_kinematic_model", "Permitir fallback cinemático Python", model_layout)
+        add_double("basic_max_wheel_speed_mm_s", "Velocidade máxima manual", model_layout, lo=1, hi=100000, step=50, suffix=" mm/s")
+        self.chk_auto_speed = QCheckBox("Velocidade automática a partir do robô")
+        model_layout.addRow(self.chk_auto_speed)
         layout.addWidget(model_group)
 
-        kin_group = QGroupBox("Kinematic options")
-        kin_layout = QFormLayout(kin_group)
-        self.chk_use_accel = QCheckBox("Use wheel acceleration limit")
-        self.chk_use_accel.setToolTip(
-            "Only used when the DC motor model is disabled.\n"
-            "When disabled, wheel speed jumps directly to the PWM target."
-        )
-        kin_layout.addRow(self.chk_use_accel)
+        accel_group = QGroupBox("2. Limite de aceleração")
+        accel_layout = QFormLayout(accel_group)
+        self.chk_use_accel = add_check("custom_use_acceleration_limit", "Habilitar limite de aceleração", accel_layout)
+        self.chk_auto_accel = add_check("custom_use_auto_acceleration_limit", "Automático a partir do robô", accel_layout)
+        add_double("custom_max_wheel_accel_mm_s2", "Aceleração máxima", accel_layout, lo=1, hi=1_000_000, step=500, suffix=" mm/s²")
+        layout.addWidget(accel_group)
 
-        self.chk_auto_speed = QCheckBox("Auto from robot")
-        self.chk_auto_speed.setToolTip(
-            "When checked, the full-PWM wheel speed is derived from battery, motor, gear ratio and wheel radius."
-        )
-        self.spin_speed = QDoubleSpinBox()
-        self.spin_speed.setRange(1.0, 100000.0)
-        self.spin_speed.setDecimals(3)
-        self.spin_speed.setSingleStep(50.0)
-        self.spin_speed.setSuffix(" mm/s")
-        speed_row = QWidget()
-        speed_layout = QHBoxLayout(speed_row); speed_layout.setContentsMargins(0, 0, 0, 0)
-        speed_layout.addWidget(self.chk_auto_speed)
-        speed_layout.addWidget(self.spin_speed)
-        kin_layout.addRow("Max wheel speed", speed_row)
+        batt_group = QGroupBox("3. Bateria")
+        batt_layout = QFormLayout(batt_group)
+        add_check("custom_use_battery_model", "Habilitar descarga de bateria", batt_layout)
+        add_double("custom_battery_initial_voltage_v", "Tensão inicial", batt_layout, lo=0.1, hi=100, step=0.1, suffix=" V")
+        add_double("custom_battery_nominal_voltage_v", "Tensão nominal", batt_layout, lo=0.1, hi=100, step=0.1, suffix=" V")
+        add_double("custom_battery_min_voltage_v", "Tensão mínima", batt_layout, lo=0.0, hi=100, step=0.1, suffix=" V")
+        add_double("custom_battery_capacity_mah", "Capacidade", batt_layout, lo=1, hi=100000, step=100, suffix=" mAh")
+        add_double("custom_battery_internal_resistance_ohm", "Resistência interna", batt_layout, lo=0, hi=100, step=0.01, decimals=4, suffix=" Ω")
+        add_double("custom_battery_soc_initial", "SOC inicial", batt_layout, lo=0, hi=1, step=0.05, decimals=3)
+        layout.addWidget(batt_group)
 
-        self.chk_auto_accel = QCheckBox("Auto from robot")
-        self.chk_auto_accel.setToolTip(
-            "When checked, the acceleration limit is derived from the robot friction estimate."
-        )
-        self.spin_accel = QDoubleSpinBox()
-        self.spin_accel.setRange(1.0, 1000000.0)
-        self.spin_accel.setDecimals(3)
-        self.spin_accel.setSingleStep(500.0)
-        self.spin_accel.setSuffix(" mm/s²")
-        accel_row = QWidget()
-        accel_layout = QHBoxLayout(accel_row); accel_layout.setContentsMargins(0, 0, 0, 0)
-        accel_layout.addWidget(self.chk_auto_accel)
-        accel_layout.addWidget(self.spin_accel)
-        kin_layout.addRow("Max wheel acceleration", accel_row)
-        layout.addWidget(kin_group)
+        sensor_group = QGroupBox("4. Sensores com ruído")
+        sensor_layout = QFormLayout(sensor_group)
+        add_check("custom_use_sensor_noise", "Habilitar ruído nos sensores de linha", sensor_layout)
+        add_double("custom_sensor_noise_std", "Desvio padrão legado", sensor_layout, lo=0, hi=65535, step=0.005, decimals=5)
+        add_double("sensor_common_noise_std", "Ruído comum", sensor_layout, lo=0, hi=65535, step=0.005, decimals=5)
+        add_double("sensor_individual_noise_std", "Ruído individual", sensor_layout, lo=0, hi=65535, step=0.005, decimals=5)
+        add_double("sensor_filter_tau_ms", "Filtro temporal tau", sensor_layout, lo=0, hi=10000, step=1, suffix=" ms")
+        add_double("sensor_latency_ms", "Latência", sensor_layout, lo=0, hi=10000, step=1, suffix=" ms")
+        add_double("sensor_update_rate_Hz", "Update rate", sensor_layout, lo=0, hi=10000, step=1, suffix=" Hz")
+        add_double("sensor_gain_default", "Ganho default", sensor_layout, lo=0.001, hi=1000, step=0.01, decimals=4)
+        add_double("sensor_offset_default", "Offset default", sensor_layout, lo=-65535, hi=65535, step=1)
+        add_check("verbose_sensor_log", "Log detalhado raw/calibrated/filtered", sensor_layout)
+        add_int("custom_sensor_noise_seed", "Seed", sensor_layout, lo=0, hi=2_147_483_647)
+        layout.addWidget(sensor_group)
+
+        enc_group = QGroupBox("5. Encoder")
+        enc_layout = QFormLayout(enc_group)
+        add_check("custom_use_encoder_model", "Habilitar encoder", enc_layout)
+        add_int("custom_encoder_ticks_per_rev", "Ticks por volta", enc_layout, lo=1, hi=1_000_000)
+        add_double("custom_encoder_noise_std_ticks", "Ruído", enc_layout, lo=0, hi=1_000_000, step=0.1, suffix=" ticks")
+        add_check("custom_encoder_quantization", "Quantizar ticks", enc_layout)
+        layout.addWidget(enc_group)
+
+        imu_group = QGroupBox("6. IMU")
+        imu_layout = QFormLayout(imu_group)
+        add_check("custom_use_imu_model", "Habilitar IMU", imu_layout)
+        add_double("custom_imu_gyro_noise_std_rad_s", "Ruído gyro", imu_layout, lo=0, hi=1000, step=0.001, decimals=6, suffix=" rad/s")
+        add_double("custom_imu_accel_noise_std_mm_s2", "Ruído acelerômetro", imu_layout, lo=0, hi=1_000_000, step=1, suffix=" mm/s²")
+        layout.addWidget(imu_group)
+
+        slip_group = QGroupBox("7. Slip de roda")
+        slip_layout = QFormLayout(slip_group)
+        add_check("custom_use_wheel_slip", "Habilitar slip", slip_layout)
+        add_double("custom_slip_ratio_left", "Slip manual esquerdo", slip_layout, lo=0, hi=0.95, step=0.01, decimals=4)
+        add_double("custom_slip_ratio_right", "Slip manual direito", slip_layout, lo=0, hi=0.95, step=0.01, decimals=4)
+        add_double("custom_slip_noise_std", "Ruído de slip", slip_layout, lo=0, hi=0.95, step=0.001, decimals=5)
+        add_double("custom_slip_stiffness_factor", "Rigidez slip contínuo", slip_layout, lo=0, hi=10, step=0.01, decimals=4)
+        add_double("custom_slip_at_limit", "Slip no limite", slip_layout, lo=0, hi=0.99, step=0.01, decimals=4)
+        add_double("custom_slip_max_ratio", "Slip máximo", slip_layout, lo=0, hi=0.99, step=0.01, decimals=4)
+        add_check("custom_use_combined_slip_limit", "Limite combinado longitudinal + lateral", slip_layout)
+        add_check("custom_use_lateral_slip", "Slip lateral em curva", slip_layout)
+        add_double("custom_mu_static_left", "µ estático esquerdo override", slip_layout, lo=0, hi=10, step=0.01, decimals=4)
+        add_double("custom_mu_static_right", "µ estático direito override", slip_layout, lo=0, hi=10, step=0.01, decimals=4)
+        add_double("custom_mu_kinetic_left", "µ cinético esquerdo override", slip_layout, lo=0, hi=10, step=0.01, decimals=4)
+        add_double("custom_mu_kinetic_right", "µ cinético direito override", slip_layout, lo=0, hi=10, step=0.01, decimals=4)
+        layout.addWidget(slip_group)
+
+        track_group = QGroupBox("8. Imperfeições da pista")
+        track_layout = QFormLayout(track_group)
+        add_check("custom_use_track_imperfections", "Habilitar imperfeições procedurais", track_layout)
+        add_double("custom_track_imperfection_amplitude_mm", "Amplitude", track_layout, lo=0, hi=1000, step=0.1, suffix=" mm")
+        add_double("custom_track_imperfection_wavelength_mm", "Comprimento de onda", track_layout, lo=1, hi=100000, step=10, suffix=" mm")
+        add_double("custom_track_imperfection_noise_std", "Ruído", track_layout, lo=0, hi=1000, step=0.1, suffix=" mm")
+        layout.addWidget(track_group)
+
+        adv_group = QGroupBox("9. Parâmetros avançados do motor/C")
+        adv_layout = QFormLayout(adv_group)
+        add_double("custom_motor_deadzone_pwm", "Deadzone PWM", adv_layout, lo=0, hi=100000, step=1)
+        add_double("custom_current_limit_a", "Limite de corrente", adv_layout, lo=0, hi=1000, step=0.1, suffix=" A")
+        add_double("custom_drivetrain_efficiency", "Eficiência drivetrain", adv_layout, lo=0.001, hi=1.0, step=0.01, decimals=4)
+        add_double("custom_viscous_friction", "Atrito viscoso", adv_layout, lo=0, hi=1000, step=0.000001, decimals=9)
+        add_double("custom_coulomb_friction", "Atrito Coulomb", adv_layout, lo=0, hi=1000, step=0.000001, decimals=9)
+        add_check("custom_pwm_saturation_enabled", "Saturar PWM", adv_layout)
+        add_double("custom_max_pwm", "PWM máximo manual", adv_layout, lo=1, hi=1_000_000, step=1)
+        self.chk_auto_pwm = QCheckBox("PWM máximo automático do robô")
+        adv_layout.addRow(self.chk_auto_pwm)
+        layout.addWidget(adv_group)
 
         note = QLabel(
-            "These values are applied when you start the next simulation. "
-            "They do not change a simulation that is already running."
+            "As mudanças são salvas ao clicar OK e passam a valer apenas na próxima simulação. "
+            "Cada opção exibida é repassada para SimulationConfig e consumida pela engine, pelo modelo físico ou pelo backend C."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #888888;")
         layout.addWidget(note)
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        root.addWidget(buttons)
 
         self.chk_use_dc.toggled.connect(self._update_enabled)
+        self.chk_use_accel.toggled.connect(self._update_enabled)
         self.chk_auto_speed.toggled.connect(self._update_enabled)
         self.chk_auto_accel.toggled.connect(self._update_enabled)
+        self.chk_auto_pwm.toggled.connect(self._update_enabled)
         self._load_settings(self._settings)
         self._update_enabled()
 
+    @staticmethod
+    def default_settings() -> dict[str, Any]:
+        return {
+            "custom_use_dc_motor_model": True,
+            "custom_use_kinematic_model": True,
+            "custom_use_acceleration_limit": True,
+            "custom_use_battery_model": False,
+            "custom_use_sensor_noise": False,
+            "custom_use_encoder_model": False,
+            "custom_use_imu_model": False,
+            "custom_use_wheel_slip": False,
+            "custom_use_track_imperfections": False,
+            "custom_use_c_backend": True,
+            "custom_allow_python_fallback": False,
+            "custom_use_auto_acceleration_limit": True,
+            "basic_max_wheel_speed_mm_s": None,
+            "basic_max_wheel_accel_mm_s2": None,
+            "custom_max_wheel_accel_mm_s2": 9810.0,
+            "custom_battery_initial_voltage_v": 7.4,
+            "custom_battery_nominal_voltage_v": 7.4,
+            "custom_battery_min_voltage_v": 6.0,
+            "custom_battery_capacity_mah": 1000.0,
+            "custom_battery_internal_resistance_ohm": 0.15,
+            "custom_battery_soc_initial": 1.0,
+            "custom_sensor_noise_std": 0.02,
+            "sensor_common_noise_std": 0.0,
+            "sensor_individual_noise_std": 0.0,
+            "sensor_filter_tau_ms": 0.0,
+            "sensor_latency_ms": 0.0,
+            "sensor_update_rate_Hz": 0.0,
+            "sensor_gain_default": 1.0,
+            "sensor_offset_default": 0.0,
+            "verbose_sensor_log": False,
+            "custom_sensor_noise_seed": 12345,
+            "custom_encoder_ticks_per_rev": 1024,
+            "custom_encoder_noise_std_ticks": 0.0,
+            "custom_encoder_quantization": True,
+            "custom_imu_gyro_noise_std_rad_s": 0.0,
+            "custom_imu_accel_noise_std_mm_s2": 0.0,
+            "custom_slip_ratio_left": 0.0,
+            "custom_slip_ratio_right": 0.0,
+            "custom_slip_noise_std": 0.0,
+            "custom_slip_stiffness_factor": 0.03,
+            "custom_slip_at_limit": 0.05,
+            "custom_slip_max_ratio": 0.95,
+            "custom_use_combined_slip_limit": True,
+            "custom_use_lateral_slip": True,
+            "custom_mu_static_left": 0.0,
+            "custom_mu_static_right": 0.0,
+            "custom_mu_kinetic_left": 0.0,
+            "custom_mu_kinetic_right": 0.0,
+            "custom_track_imperfection_amplitude_mm": 0.0,
+            "custom_track_imperfection_wavelength_mm": 500.0,
+            "custom_track_imperfection_noise_std": 0.0,
+            "custom_motor_deadzone_pwm": 0.0,
+            "custom_current_limit_a": 0.0,
+            "custom_drivetrain_efficiency": 0.9,
+            "custom_viscous_friction": 0.0,
+            "custom_coulomb_friction": 0.0,
+            "custom_pwm_saturation_enabled": True,
+            "custom_max_pwm": None,
+        }
+
     def _load_settings(self, settings: dict[str, Any]) -> None:
-        self.chk_use_dc.setChecked(bool(settings.get("custom_use_dc_motor_model", True)))
-        self.chk_use_accel.setChecked(bool(settings.get("custom_use_acceleration_limit", True)))
-
-        speed = settings.get("basic_max_wheel_speed_mm_s", None)
-        self.chk_auto_speed.setChecked(speed is None)
-        self.spin_speed.setValue(float(speed if speed is not None else 500.0))
-
-        accel = settings.get("basic_max_wheel_accel_mm_s2", None)
-        self.chk_auto_accel.setChecked(accel is None)
-        self.spin_accel.setValue(float(accel if accel is not None else 9810.0))
+        merged = self.default_settings()
+        merged.update(settings or {})
+        for key, chk in self._checks.items():
+            chk.setChecked(bool(merged.get(key, False)))
+        for key, spin in self._double.items():
+            value = merged.get(key, None)
+            if value is None:
+                value = 500.0 if key == "basic_max_wheel_speed_mm_s" else 4095.0 if key == "custom_max_pwm" else self.default_settings().get(key, 0.0)
+            spin.setValue(float(value))
+        for key, spin in self._int.items():
+            spin.setValue(int(merged.get(key, self.default_settings().get(key, 0))))
+        self.chk_auto_speed.setChecked(merged.get("basic_max_wheel_speed_mm_s", None) is None)
+        self.chk_auto_pwm.setChecked(merged.get("custom_max_pwm", None) is None)
 
     def _update_enabled(self) -> None:
         use_kinematic = not self.chk_use_dc.isChecked()
-        self.chk_use_accel.setEnabled(use_kinematic)
+        self.chk_use_accel.setEnabled(True)
+        self.chk_use_kin.setEnabled(True)
+        self.chk_use_c.setEnabled(self.chk_use_dc.isChecked())
+        self.chk_allow_py_fallback.setEnabled(self.chk_use_dc.isChecked() and self.chk_use_c.isChecked())
         self.chk_auto_speed.setEnabled(use_kinematic)
-        self.spin_speed.setEnabled(use_kinematic and not self.chk_auto_speed.isChecked())
-        self.chk_auto_accel.setEnabled(use_kinematic and self.chk_use_accel.isChecked())
-        self.spin_accel.setEnabled(
-            use_kinematic and self.chk_use_accel.isChecked() and not self.chk_auto_accel.isChecked()
-        )
+        self._double["basic_max_wheel_speed_mm_s"].setEnabled(use_kinematic and not self.chk_auto_speed.isChecked())
+        self.chk_auto_accel.setEnabled(self.chk_use_accel.isChecked())
+        self._double["custom_max_wheel_accel_mm_s2"].setEnabled(self.chk_use_accel.isChecked() and not self.chk_auto_accel.isChecked())
+        self._double["custom_max_pwm"].setEnabled(not self.chk_auto_pwm.isChecked())
 
     def settings(self) -> dict[str, Any]:
-        return {
-            "custom_use_dc_motor_model": self.chk_use_dc.isChecked(),
-            "custom_use_acceleration_limit": self.chk_use_accel.isChecked(),
-            "basic_max_wheel_speed_mm_s": None if self.chk_auto_speed.isChecked() else float(self.spin_speed.value()),
-            "basic_max_wheel_accel_mm_s2": None if self.chk_auto_accel.isChecked() else float(self.spin_accel.value()),
-        }
+        data = self.default_settings()
+        for key, chk in self._checks.items():
+            data[key] = chk.isChecked()
+        for key, spin in self._double.items():
+            data[key] = float(spin.value())
+        for key, spin in self._int.items():
+            data[key] = int(spin.value())
+        if self.chk_auto_speed.isChecked():
+            data["basic_max_wheel_speed_mm_s"] = None
+        if self.chk_auto_accel.isChecked():
+            data["basic_max_wheel_accel_mm_s2"] = None
+        else:
+            data["basic_max_wheel_accel_mm_s2"] = data["custom_max_wheel_accel_mm_s2"]
+        if self.chk_auto_pwm.isChecked():
+            data["custom_max_pwm"] = None
+        return data
 
 class MainWindow(QMainWindow):
     """Main GUI: loads files, starts simulation, and replays results."""
@@ -266,14 +430,9 @@ class MainWindow(QMainWindow):
         self.combo_physics.addItem("Ideal", "ideal")
         self.combo_physics.addItem("Custom", "custom")
         self.combo_physics.setCurrentIndex(0)
-        self.combo_physics.setToolTip("Physics profile used by SimulationEngine. Default keeps the current DC backend behavior.")
+        self.combo_physics.setToolTip("Physics profile used by SimulationEngine. Realistic now enables the complete Phase 4 physics preset.")
 
-        self.custom_physics_settings = {
-            "custom_use_dc_motor_model": True,
-            "custom_use_acceleration_limit": True,
-            "basic_max_wheel_speed_mm_s": None,
-            "basic_max_wheel_accel_mm_s2": None,
-        }
+        self.custom_physics_settings = CustomPhysicsDialog.default_settings()
         self.btn_custom_physics = QPushButton("Custom settings…")
         self.btn_custom_physics.setToolTip("Configure all custom physics options used on the next simulation run.")
         self.lbl_custom_physics = QLabel("")
@@ -752,18 +911,23 @@ class MainWindow(QMainWindow):
 
     def _custom_physics_summary(self) -> str:
         st = self.custom_physics_settings
+        enabled = []
         if bool(st.get("custom_use_dc_motor_model", True)):
-            return "DC motor model enabled: custom uses the native C drivetrain, same base path as Realistic."
-
-        speed = st.get("basic_max_wheel_speed_mm_s", None)
-        accel = st.get("basic_max_wheel_accel_mm_s2", None)
-        accel_on = bool(st.get("custom_use_acceleration_limit", True))
-        speed_text = "auto wheel speed" if speed is None else f"max wheel speed {float(speed):.1f} mm/s"
-        if accel_on:
-            accel_text = "auto acceleration" if accel is None else f"max acceleration {float(accel):.1f} mm/s²"
+            enabled.append("DC/C")
         else:
-            accel_text = "no acceleration limit"
-        return f"Kinematic model: {speed_text}, {accel_text}."
+            enabled.append("cinemático")
+        for key, label in [
+            ("custom_use_acceleration_limit", "aceleração"),
+            ("custom_use_battery_model", "bateria"),
+            ("custom_use_sensor_noise", "ruído sensores"),
+            ("custom_use_encoder_model", "encoder"),
+            ("custom_use_imu_model", "IMU"),
+            ("custom_use_wheel_slip", "slip"),
+            ("custom_use_track_imperfections", "pista imperfeita"),
+        ]:
+            if bool(st.get(key, False)):
+                enabled.append(label)
+        return "Custom ativo: " + ", ".join(enabled) + "."
 
     def _update_custom_physics_summary(self) -> None:
         is_custom = self._current_physics_profile() == "custom"
@@ -787,11 +951,13 @@ class MainWindow(QMainWindow):
         """Copy UI-selected custom settings into the config used by the next worker."""
         if str(cfg.physics_profile).strip().lower() != "custom":
             return
-        st = self.custom_physics_settings
-        cfg.custom_use_dc_motor_model = bool(st.get("custom_use_dc_motor_model", True))
-        cfg.custom_use_acceleration_limit = bool(st.get("custom_use_acceleration_limit", True))
-        cfg.basic_max_wheel_speed_mm_s = st.get("basic_max_wheel_speed_mm_s", None)
-        cfg.basic_max_wheel_accel_mm_s2 = st.get("basic_max_wheel_accel_mm_s2", None)
+        for key, value in self.custom_physics_settings.items():
+            if hasattr(cfg, key):
+                setattr(cfg, key, value)
+        # The Phase 3 kinematic fields are still accepted and now mirror the
+        # Phase 4 manual speed/acceleration settings.
+        cfg.basic_max_wheel_speed_mm_s = self.custom_physics_settings.get("basic_max_wheel_speed_mm_s", None)
+        cfg.basic_max_wheel_accel_mm_s2 = self.custom_physics_settings.get("basic_max_wheel_accel_mm_s2", None)
 
     def _build_simulation_config(self) -> SimulationConfig:
         if self.robot is None:

@@ -10,6 +10,7 @@ from Utils.validation import ValidationError
 from sim.engine import SimulationEngine
 from sim.physics.dc_motor import DCMotorPhysicsModel
 from sim.physics.factory import create_physics_model
+from sim.physics.custom import CustomPhysicsModel, RealisticPhysicsModel
 from sim.physics.ideal import IdealPhysicsModel
 from sim.physics.kinematic import BasicKinematicPhysicsModel
 
@@ -92,10 +93,10 @@ def test_physics_factory_selects_models():
     robot = _robot()
     assert isinstance(create_physics_model(SimulationConfig(physics_profile="ideal"), robot), IdealPhysicsModel)
     assert isinstance(create_physics_model(SimulationConfig(physics_profile="basic"), robot), BasicKinematicPhysicsModel)
-    assert isinstance(create_physics_model(SimulationConfig(physics_profile="realistic"), robot), DCMotorPhysicsModel)
-    assert isinstance(create_physics_model(SimulationConfig(physics_profile="custom", custom_use_dc_motor_model=True), robot), DCMotorPhysicsModel)
+    assert isinstance(create_physics_model(SimulationConfig(physics_profile="realistic"), robot), RealisticPhysicsModel)
+    assert isinstance(create_physics_model(SimulationConfig(physics_profile="custom", custom_use_dc_motor_model=True), robot), CustomPhysicsModel)
     custom_basic = create_physics_model(SimulationConfig(physics_profile="custom", custom_use_dc_motor_model=False), robot)
-    assert isinstance(custom_basic, BasicKinematicPhysicsModel)
+    assert isinstance(custom_basic, CustomPhysicsModel)
 
 
 def test_physics_factory_rejects_invalid_profile_without_raw_traceback():
@@ -251,7 +252,7 @@ def test_custom_kinematic_uses_manual_speed_and_acceleration_overrides():
         basic_max_wheel_accel_mm_s2=2000.0,
     )
     model = create_physics_model(cfg, robot)
-    assert isinstance(model, BasicKinematicPhysicsModel)
+    assert isinstance(model, CustomPhysicsModel)
     state = _state()
     model.reset(state)
     out = model.step(state, 100, 100, 0.01, robot, cfg)

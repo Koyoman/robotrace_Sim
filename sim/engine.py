@@ -6,6 +6,7 @@ import math
 import os
 import random
 import time
+from dataclasses import replace
 from collections.abc import Callable, Iterator
 from ctypes import c_double, c_int
 from typing import Any
@@ -30,7 +31,56 @@ from Utils.track_geometry import Pt, Pose, advance_straight
 
 
 class SimLogger:
-    """Records steps/events and writes CSV + JSON logs under Logs/."""
+    """Records per-step telemetry/events and writes CSV + JSON logs under Logs/."""
+
+    # Stable, human-friendly order for the most important scalar telemetry.
+    _preferred_cols = [
+        "t_ms", "dt_s", "physics_profile",
+        "x_mm", "y_mm", "heading_deg",
+        "v_mm_s", "omega_rad_s", "a_lin_mm_s2", "alpha_rad_s2",
+        "v_left_mm_s", "v_right_mm_s",
+        "wheel_left_surface_speed_mm_s", "wheel_right_surface_speed_mm_s",
+        "ground_left_speed_mm_s", "ground_right_speed_mm_s",
+        "omega_wheel_left_rad_s", "omega_wheel_right_rad_s",
+        "alpha_wheel_left_rad_s2", "alpha_wheel_right_rad_s2",
+        "J_eq_left_kgm2", "J_eq_right_kgm2",
+        "pwm_left", "pwm_right", "duty_left", "duty_right", "pwm_min", "pwm_max",
+        "battery_voltage_v", "battery_soc", "battery_current_a",
+        "current_left_a", "current_right_a", "current_total_a", "battery_power_w",
+        "motor_left_current_a", "motor_right_current_a",
+        "motor_left_current_signed_a", "motor_right_current_signed_a",
+        "motor_left_voltage_v", "motor_right_voltage_v",
+        "motor_left_back_emf_v", "motor_right_back_emf_v",
+        "motor_left_torque_nm", "motor_right_torque_nm",
+        "wheel_left_torque_nm", "wheel_right_torque_nm",
+        "tau_motor_em_left_nm", "tau_motor_em_right_nm",
+        "tau_motor_viscous_left_nm", "tau_motor_viscous_right_nm",
+        "tau_motor_coulomb_left_nm", "tau_motor_coulomb_right_nm",
+        "tau_motor_net_left_nm", "tau_motor_net_right_nm",
+        "tau_wheel_drive_left_nm", "tau_wheel_drive_right_nm",
+        "tau_ground_left_nm", "tau_ground_right_nm", "tau_slip_loss_left_nm", "tau_slip_loss_right_nm",
+        "mechanical_power_left_w", "mechanical_power_right_w", "brake_dissipated_power_w",
+        "enc_left_ticks", "enc_right_ticks",
+        "enc_left_delta_ticks", "enc_right_delta_ticks",
+        "enc_left_rad_s", "enc_right_rad_s",
+        "imu_omega_rad_s", "imu_alpha_rad_s2",
+        "imu_accel_x_mm_s2", "imu_accel_y_mm_s2",
+        "slip_ratio_left", "slip_ratio_right", "lateral_slip_left", "lateral_slip_right",
+        "force_longitudinal_command_left_n", "force_longitudinal_command_right_n",
+        "force_longitudinal_ground_left_n", "force_longitudinal_ground_right_n",
+        "force_longitudinal_max_left_n", "force_longitudinal_max_right_n",
+        "lateral_force_left_n", "lateral_force_right_n", "friction_usage_left", "friction_usage_right",
+        "traction_force_left_n", "traction_force_right_n",
+        "max_static_force_left_n", "max_static_force_right_n",
+        "copper_loss_left_w", "copper_loss_right_w", "driver_loss_left_w", "driver_loss_right_w",
+        "rolling_resistance_loss_w", "tire_slip_loss_left_w", "tire_slip_loss_right_w",
+        "battery_energy_j", "total_kinetic_energy_j", "total_loss_energy_j",
+        "energy_balance_error_j", "energy_balance_error_percent",
+        "physics_backend", "linesim_abi_version", "c_backend_loaded", "c_backend_path",
+        "c_backend_error", "c_modular_step_available", "using_python_fallback",
+        "c_step_call_count", "last_step_executed_in_c",
+        "hit", "finished",
+    ]
 
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
@@ -42,15 +92,49 @@ class SimLogger:
         self.events: list[dict[str, Any]] = []
         self._max_sensors = 0
 
-    def log_step(self, t_ms: int, x: float, y: float, h: float, v: float, w: float, pwm_l: int, pwm_r: int,
-                 sensors: list[int] | None = None) -> None:
+    def log_step(
+        self,
+        t_ms: int | None = None,
+        x: float | None = None,
+        y: float | None = None,
+        h: float | None = None,
+        v: float | None = None,
+        w: float | None = None,
+        pwm_l: int | None = None,
+        pwm_r: int | None = None,
+        sensors: list[int] | None = None,
+        step_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Append one step.
+
+        The old positional arguments are kept for compatibility, but Phase 4.2
+        uses ``step_data`` so every physical channel present in SimulationState
+        is persisted to CSV and JSON.
+        """
         vals = list(sensors) if sensors is not None else []
+        record: dict[str, Any] = dict(step_data or {})
+        if t_ms is not None:
+            record["t_ms"] = t_ms
+        if x is not None:
+            record["x_mm"] = x
+        if y is not None:
+            record["y_mm"] = y
+        if h is not None:
+            record["heading_deg"] = h
+        if v is not None:
+            record["v_mm_s"] = v
+        if w is not None:
+            record["omega_rad_s"] = w
+        if pwm_l is not None:
+            record["pwm_left"] = pwm_l
+        if pwm_r is not None:
+            record["pwm_right"] = pwm_r
+        if sensors is not None:
+            record["sensors"] = vals
+        else:
+            vals = list(record.get("sensors", []))
         self._max_sensors = max(self._max_sensors, len(vals))
-        self.steps.append({
-            "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h,
-            "v_mm_s": v, "omega_rad_s": w, "pwm_left": pwm_l, "pwm_right": pwm_r,
-            "sensors": vals,
-        })
+        self.steps.append(record)
 
     def log_event(self, kind: str, t_ms: int, x: float, y: float, h: float, extra: dict | None = None) -> None:
         ev = {"event": kind, "t_ms": t_ms, "x_mm": x, "y_mm": y, "heading_deg": h}
@@ -58,17 +142,33 @@ class SimLogger:
             ev.update(extra)
         self.events.append(ev)
 
+    def _csv_columns(self) -> list[str]:
+        seen = set()
+        cols: list[str] = []
+        for col in self._preferred_cols:
+            if any(col in step for step in self.steps):
+                cols.append(col)
+                seen.add(col)
+        dynamic = sorted({k for step in self.steps for k in step.keys()} - seen - {"sensors"})
+        cols.extend(dynamic)
+        cols.extend([f"s{i}" for i in range(self._max_sensors)])
+        return cols
+
     def flush(self) -> None:
         try:
             with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                base_cols = ["t_ms", "x_mm", "y_mm", "heading_deg", "v_mm_s", "omega_rad_s", "pwm_left", "pwm_right"]
-                sn_cols = [f"s{i}" for i in range(self._max_sensors)]
-                w.writerow(base_cols + sn_cols)
+                cols = self._csv_columns()
+                w.writerow(cols)
                 for s in self.steps:
-                    row = [s["t_ms"], s["x_mm"], s["y_mm"], s["heading_deg"], s["v_mm_s"], s["omega_rad_s"], s["pwm_left"], s["pwm_right"]]
-                    vals = s.get("sensors", [])
-                    row.extend([vals[i] if i < len(vals) else "" for i in range(self._max_sensors)])
+                    vals = list(s.get("sensors", []))
+                    row: list[Any] = []
+                    for col in cols:
+                        if col.startswith("s") and col[1:].isdigit():
+                            i = int(col[1:])
+                            row.append(vals[i] if i < len(vals) else "")
+                        else:
+                            row.append(s.get(col, ""))
                     w.writerow(row)
         except Exception as e:
             print("CSV log error:", e)
@@ -217,6 +317,9 @@ class SimulationEngine:
         self.params = derive_runtime_params(robot, config)
         if config.random_seed is not None:
             random.seed(config.random_seed)
+        self._phase4_noise_rng = random.Random(int(config.custom_sensor_noise_seed))
+        self._sensor_runtime: list[dict[str, Any]] = []
+        self._last_sensor_debug: dict[str, Any] = {}
 
         self.dt_s = float(config.dt_s)
 
@@ -242,6 +345,18 @@ class SimulationEngine:
             self._linesim = get_linesim()
         return self._linesim
 
+    def _native_or_policy(self):
+        try:
+            return self._native() if self.physics_model.requires_native else None
+        except RuntimeError:
+            cfg = self._effective_physics_config()
+            allow = bool(getattr(cfg, "custom_allow_python_fallback", False))
+            if str(self.config.physics_profile).strip().lower() == "realistic":
+                allow = bool(getattr(self.config, "allow_python_fallback_for_realistic", False))
+            if allow:
+                return None
+            raise
+
     def _initial_pose(self) -> Pose:
         segs = getattr(self, "_segs", None)
         origin = getattr(self, "_origin", None)
@@ -260,11 +375,128 @@ class SimulationEngine:
     def _sensors_world_xy(self, x: float, y: float, h_deg: float) -> tuple[list[float], list[float]]:
         sx: list[float] = []
         sy: list[float] = []
+        imperfection_offset = 0.0
+        if self._track_imperfections_enabled():
+            cfg = self._effective_physics_config()
+            amp = float(cfg.custom_track_imperfection_amplitude_mm)
+            wave = max(1e-9, float(cfg.custom_track_imperfection_wavelength_mm))
+            # Runtime procedural offset: it changes where sensors sample the cached
+            # raster, but never mutates the track JSON or the .rmap cache.
+            s_approx = math.hypot(float(x), float(y))
+            imperfection_offset = amp * math.sin((2.0 * math.pi * s_approx) / wave)
+            if cfg.custom_track_imperfection_noise_std > 0.0:
+                imperfection_offset += self._phase4_noise_rng.gauss(0.0, cfg.custom_track_imperfection_noise_std)
+        h_rad = math.radians(float(h_deg))
+        nx = -math.sin(h_rad)
+        ny = math.cos(h_rad)
         for sensor in self.robot.sensors:
             wx, wy = robot_local_to_world(self.robot, x, y, h_deg, sensor.x_mm, sensor.y_mm)
+            if imperfection_offset:
+                wx += nx * imperfection_offset
+                wy += ny * imperfection_offset
             sx.append(wx)
             sy.append(wy)
         return sx, sy
+
+    def _effective_physics_config(self) -> SimulationConfig:
+        if str(self.config.physics_profile).strip().lower() == "realistic":
+            return self.config.as_realistic_preset()
+        return self.config
+
+    def _sensor_noise_enabled(self) -> bool:
+        cfg = self._effective_physics_config()
+        return bool(cfg.custom_use_sensor_noise and cfg.custom_sensor_noise_std > 0.0)
+
+    def _track_imperfections_enabled(self) -> bool:
+        cfg = self._effective_physics_config()
+        return bool(cfg.custom_use_track_imperfections and cfg.custom_track_imperfection_amplitude_mm > 0.0)
+
+    def _apply_phase4_sensor_noise(self, values: list[int]) -> list[int]:
+        # Backward-compatible wrapper: Phase 4.4 calls _process_sensor_values.
+        return self._process_sensor_values(values, self.dt_s)
+
+    def _sensor_param(self, sensor: Any, attr: str, default: float) -> float:
+        value = getattr(sensor, attr, None)
+        return float(default if value is None else value)
+
+    def _ensure_sensor_runtime(self, n: int, initial_values: list[int]) -> None:
+        if len(self._sensor_runtime) == n:
+            return
+        self._sensor_runtime = []
+        cfg = self._effective_physics_config()
+        for i in range(n):
+            init = float(initial_values[i]) if i < len(initial_values) else 0.0
+            self._sensor_runtime.append({
+                "filtered": init,
+                "held": init,
+                "elapsed": 0.0,
+                "queue": [],
+            })
+        self._last_sensor_debug = {}
+
+    def _process_sensor_values(self, values: list[int], dt_s: float) -> list[int]:
+        cfg = self._effective_physics_config()
+        self._ensure_sensor_runtime(len(values), values)
+        maxv = (1 << int(max(1, min(16, int(self.sensor_bits))))) - 1
+        self._last_sensor_debug = {}
+        if not cfg.custom_use_sensor_noise:
+            return values
+
+        sigma_common = cfg.sensor_common_noise_std or cfg.custom_sensor_noise_std
+        sigma_common_counts = sigma_common * maxv if sigma_common <= 1.0 else sigma_common
+        common_noise = self._phase4_noise_rng.gauss(0.0, sigma_common_counts) if sigma_common_counts > 0.0 else 0.0
+        out: list[int] = []
+        for i, base in enumerate(values):
+            sensor = self.robot.sensors[i] if i < len(self.robot.sensors) else None
+            rt = self._sensor_runtime[i]
+            gain = self._sensor_param(sensor, "gain", cfg.sensor_gain_default)
+            offset = self._sensor_param(sensor, "offset", cfg.sensor_offset_default)
+            indiv_std = self._sensor_param(sensor, "noise_std", cfg.sensor_individual_noise_std)
+            indiv_counts = indiv_std * maxv if indiv_std <= 1.0 else indiv_std
+            tau_ms = self._sensor_param(sensor, "filter_tau_ms", cfg.sensor_filter_tau_ms)
+            latency_ms = self._sensor_param(sensor, "latency_ms", cfg.sensor_latency_ms)
+            rate_hz = self._sensor_param(sensor, "update_rate_Hz", cfg.sensor_update_rate_Hz)
+
+            raw = float(base)
+            calibrated = gain * raw + offset
+            noisy = calibrated + common_noise
+            if indiv_counts > 0.0:
+                noisy += self._phase4_noise_rng.gauss(0.0, indiv_counts)
+
+            due = True
+            if rate_hz > 0.0:
+                rt["elapsed"] = float(rt.get("elapsed", 0.0)) + max(0.0, float(dt_s))
+                period = 1.0 / rate_hz
+                due = rt["elapsed"] + 1e-12 >= period
+                if due:
+                    rt["elapsed"] = math.fmod(rt["elapsed"], period)
+            if due:
+                if tau_ms > 0.0:
+                    tau_s = tau_ms * 0.001
+                    alpha = float(dt_s) / (tau_s + float(dt_s))
+                    rt["filtered"] = float(rt["filtered"]) + alpha * (noisy - float(rt["filtered"]))
+                else:
+                    rt["filtered"] = noisy
+                rt["held"] = rt["filtered"]
+
+            produced = float(rt["held"])
+            if latency_ms > 0.0:
+                q = rt["queue"]
+                q.append((0.0, produced))
+                for j, (age, val) in enumerate(q):
+                    q[j] = (age + float(dt_s) * 1000.0, val)
+                delayed = q[0][1]
+                while q and q[0][0] >= latency_ms:
+                    delayed = q.pop(0)[1]
+                produced = delayed
+            quant = int(max(0, min(maxv, round(produced))))
+            out.append(quant)
+            if cfg.verbose_sensor_log:
+                self._last_sensor_debug[f"s{i}_raw"] = raw
+                self._last_sensor_debug[f"s{i}_calibrated"] = calibrated
+                self._last_sensor_debug[f"s{i}_filtered"] = float(rt["filtered"])
+                self._last_sensor_debug[f"s{i}_latency_output"] = produced
+        return out
 
     def _coverage_from_raster_batch(self, sx: list[float], sy: list[float], size_mm: float, grid_n: int = 3) -> list[float]:
         meta = getattr(self, "_rmap_meta", None)
@@ -351,7 +583,7 @@ class SimulationEngine:
         )
         self.physics_model.reset(current_state)
 
-        native = self._native() if self.physics_model.requires_native else None
+        native = self._native_or_policy()
 
         zone = None
         if self._gates:
@@ -374,22 +606,9 @@ class SimulationEngine:
                 self.value_of_line, self.value_of_background,
                 self.analog_noise_line, self.analog_noise_background,
             ) for i in range(len(cov))]
+            sn_vals = self._process_sensor_values(sn_vals, dt)
 
-            controller_state = SimulationState(
-                t_ms=t_ms,
-                x_mm=current_state.x_mm,
-                y_mm=current_state.y_mm,
-                heading_deg=current_state.heading_deg,
-                v_mm_s=current_state.v_mm_s,
-                omega_rad_s=current_state.omega_rad_s,
-                a_lin_mm_s2=current_state.a_lin_mm_s2,
-                alpha_rad_s2=current_state.alpha_rad_s2,
-                v_left_mm_s=current_state.v_left_mm_s,
-                v_right_mm_s=current_state.v_right_mm_s,
-                pwm_left=current_state.pwm_left,
-                pwm_right=current_state.pwm_right,
-                sensors=sn_vals,
-            )
+            controller_state = replace(current_state, t_ms=t_ms, sensors=sn_vals)
 
             try:
                 out = self.controller_fn(controller_state.to_controller_state(dt))
@@ -444,17 +663,20 @@ class SimulationEngine:
                 )
 
             step = current_state.to_step_dict()
-            self.logger.log_step(
-                t_ms,
-                current_state.x_mm,
-                current_state.y_mm,
-                current_state.heading_deg,
-                current_state.v_mm_s,
-                current_state.omega_rad_s,
-                pwm_l,
-                pwm_r,
-                sensors=sn_vals,
-            )
+            log_record = dict(step)
+            log_record.update({
+                "t_ms": t_ms,
+                "dt_s": dt,
+                "physics_profile": str(self.config.physics_profile),
+                "pwm_left": int(pwm_l),
+                "pwm_right": int(pwm_r),
+                "sensors": list(sn_vals),
+                "hit": int(hit),
+                "finished": bool(finished),
+            })
+            if self._last_sensor_debug:
+                log_record.update(self._last_sensor_debug)
+            self.logger.log_step(step_data=log_record)
             chunk_buf.append(step)
             if len(chunk_buf) >= chunk_size:
                 yield chunk_buf
@@ -479,17 +701,5 @@ class SimulationEngine:
     def run(self) -> SimulationResult:
         steps: list[SimulationState] = []
         for step in self.iter_steps():
-            steps.append(SimulationState(
-                t_ms=int(step["t_ms"]),
-                x_mm=float(step["x_mm"]),
-                y_mm=float(step["y_mm"]),
-                heading_deg=float(step["heading_deg"]),
-                v_mm_s=float(step["v_mm_s"]),
-                omega_rad_s=float(step["omega_rad_s"]),
-                a_lin_mm_s2=float(step["a_lin_mm_s2"]),
-                alpha_rad_s2=float(step["alpha_rad_s2"]),
-                v_left_mm_s=float(step["v_left_mm_s"]),
-                v_right_mm_s=float(step["v_right_mm_s"]),
-                sensors=list(step.get("sensors", [])),
-            ))
+            steps.append(SimulationState.from_step_dict(step))
         return SimulationResult(steps=steps, summary={"dt_s": self.dt_s})
